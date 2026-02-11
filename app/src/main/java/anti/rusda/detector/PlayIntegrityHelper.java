@@ -35,18 +35,29 @@ public class PlayIntegrityHelper {
 
     /**
      * 同步执行 Play Integrity 检测。
+     * 无 Play Store/Play Services 的设备（如华为等国产厂商）视为通过，避免误报。
      * @return [status, summary, detail]
      */
     public String[] runDetectionSync() {
         if (context == null) {
             return new String[]{
-                    String.valueOf(DetectionResult.STATUS_WARNING),
-                    "No context for Play Integrity",
+                    String.valueOf(DetectionResult.STATUS_NORMAL),
+                    "No context for Play Integrity - passed",
                     "Play Integrity check skipped"
             };
         }
 
-        IntegrityManager manager = IntegrityManagerFactory.create(context);
+        IntegrityManager manager;
+        try {
+            manager = IntegrityManagerFactory.create(context);
+        } catch (Throwable t) {
+            /* 无 GMS 时 create 可能抛异常，视为通过 */
+            return new String[]{
+                    String.valueOf(DetectionResult.STATUS_NORMAL),
+                    "Play Services not available - passed (OEM device without GMS)",
+                    t.getMessage() != null ? t.getMessage() : "IntegrityManagerFactory.create failed"
+            };
+        }
         byte[] nonceBytes = new byte[32];
         new SecureRandom().nextBytes(nonceBytes);
         String nonce = Base64.encodeToString(nonceBytes, Base64.NO_WRAP);
@@ -79,15 +90,17 @@ public class PlayIntegrityHelper {
                     latch.countDown();
                 })
                 .addOnFailureListener(e -> {
-                    statusHolder[0] = DetectionResult.STATUS_WARNING;
                     String msg = e != null ? e.getMessage() : "Unknown";
-                    if (msg != null && (msg.contains("API_NOT_AVAILABLE") || msg.contains("PLAY_STORE_NOT_FOUND"))) {
-                        statusHolder[0] = DetectionResult.STATUS_WARNING;
-                        summaryHolder[0] = "Play Services unavailable (emulator or custom ROM?)";
+                    /* 无 Play Store/Play Services 的设备（华为等）视为通过，避免误报 */
+                    if (msg != null && isPlayServicesUnavailable(msg)) {
+                        statusHolder[0] = DetectionResult.STATUS_NORMAL;
+                        summaryHolder[0] = "Play Store/Services not installed - passed (OEM without GMS)";
+                        detailHolder[0] = "Device has no Google Play - treat as pass to avoid false positive";
                     } else {
+                        statusHolder[0] = DetectionResult.STATUS_WARNING;
                         summaryHolder[0] = "Play Integrity request failed";
+                        detailHolder[0] = msg != null ? msg : "No details";
                     }
-                    detailHolder[0] = msg != null ? msg : "No details";
                     latch.countDown();
                 });
 
@@ -105,5 +118,16 @@ public class PlayIntegrityHelper {
         }
 
         return new String[]{String.valueOf(statusHolder[0]), summaryHolder[0], detailHolder[0]};
+    }
+
+    /** 判断是否为「无 Play Store/Play Services」类错误，此类设备视为通过 */
+    private static boolean isPlayServicesUnavailable(String msg) {
+        if (msg == null) return false;
+        String m = msg.toLowerCase();
+        return m.contains("api_not_available")
+                || m.contains("play_store_not_found")
+                || m.contains("play store")
+                || m.contains("play services")
+                || m.contains("google play services");
     }
 }

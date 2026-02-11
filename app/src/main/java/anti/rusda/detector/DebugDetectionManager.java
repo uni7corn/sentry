@@ -18,16 +18,14 @@ import java.util.List;
  */
 public class DebugDetectionManager {
 
-    private static final String[] FRIDA_THREAD_KEYWORDS = {
-            "gmain", "gdbus", "pool-spawner", "frida-agent", "frida-gadget",
-            "frida", "gum-js-loop", "gthread", "gpool"
-    };
-
-
+    /** Frida 线程检测在 Native 层（syscall），防 Hook */
+    private static native String[] nativeDetectFridaThreads();
     /** 端口扫描在 Native 层（syscall），结果由此方法返回 */
     private static native String[] nativeGetFridaPortScanResult();
     /** 内存签名扫描在 Native 层（syscall），防 Hook */
     private static native String[] nativeGetMemorySignatureResult();
+    /** Native Hook 检测（内联/PLT/GOT），增强 Xposed 检测 */
+    private static native String[] nativeDetectHook();
 
     public static void ensureNativeLoaded() {
         try {
@@ -48,36 +46,22 @@ public class DebugDetectionManager {
         return results;
     }
 
+    /** Native 实现（syscall），防 Java 层 Hook */
     private DetectionResult detectFridaThreads() {
-        List<String> suspiciousThreads = new ArrayList<>();
+        String[] raw = nativeDetectFridaThreads();
+        if (raw == null || raw.length < 2) {
+            return new DetectionResult("Frida Threads", "Scan failed", DetectionResult.STATUS_WARNING);
+        }
         int status = DetectionResult.STATUS_NORMAL;
         try {
-            File taskDir = new File("/proc/self/task");
-            File[] threads = taskDir.listFiles();
-            if (threads != null) {
-                for (File thread : threads) {
-                    File commFile = new File(thread, "comm");
-                    if (commFile.exists()) {
-                        String threadName = readFileContent(commFile.getAbsolutePath()).trim();
-                        for (String keyword : FRIDA_THREAD_KEYWORDS) {
-                            if (threadName.toLowerCase().contains(keyword)) {
-                                suspiciousThreads.add("Thread " + thread.getName() + ": " + threadName);
-                                status = DetectionResult.STATUS_DANGER;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            suspiciousThreads.add("Error: " + e.getMessage());
-        }
-        DetectionResult result = new DetectionResult(
-                "Frida Threads",
-                status == DetectionResult.STATUS_NORMAL ? "No suspicious threads found" : suspiciousThreads.size() + " suspicious thread(s) detected",
-                status
-        );
-        result.setDetails(suspiciousThreads);
+            status = Integer.parseInt(raw[0]);
+        } catch (NumberFormatException ignored) { }
+        String summary = raw[1];
+        List<String> details = raw.length > 2
+                ? Arrays.asList(Arrays.copyOfRange(raw, 2, raw.length))
+                : Collections.emptyList();
+        DetectionResult result = new DetectionResult("Frida Threads", summary, status);
+        result.setDetails(details);
         return result;
     }
 
@@ -184,16 +168,32 @@ public class DebugDetectionManager {
         );
     }
 
+    /** Java 反射 + Native 内联/PLT 检测，双重验证 */
     private DetectionResult checkLibraryIntegrity() {
         List<String> details = new ArrayList<>();
         int status = DetectionResult.STATUS_NORMAL;
+
+        /* 1. Java: XposedBridge 类检测 */
         try {
             Class.forName("de.robv.android.xposed.XposedBridge");
-            details.add("Xposed framework detected");
+            details.add("Xposed framework detected (Class.forName)");
             status = DetectionResult.STATUS_DANGER;
         } catch (ClassNotFoundException e) {
-            details.add("Xposed framework not detected");
+            details.add("Xposed framework not detected (Class.forName)");
         }
+
+        /* 2. Native: 内联 Hook、PLT/GOT、libc 完整性 */
+        String[] hookRaw = nativeDetectHook();
+        if (hookRaw != null && hookRaw.length >= 2) {
+            try {
+                int hookStatus = Integer.parseInt(hookRaw[0]);
+                if (hookStatus == DetectionResult.STATUS_DANGER) {
+                    details.add(hookRaw.length > 2 ? hookRaw[2] : "Native hook/integrity check failed");
+                    status = DetectionResult.STATUS_DANGER;
+                }
+            } catch (NumberFormatException ignored) { }
+        }
+
         return new DetectionResult(
                 "Xposed / Hook Framework",
                 status == DetectionResult.STATUS_NORMAL ? "No Xposed detected" : "Framework modification detected",

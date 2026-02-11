@@ -87,7 +87,7 @@ sentry/
 
 - **命名空间/包名**: `anti.rusda`；**applicationId**: `anti.rusda`
 - **Native 库**: `libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）
-- **JNI 约定**: 调试 → `nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult` 等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectLsposed`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeCheckCgroup`、`nativeGetEnvVersion`；指纹 → `nativeGetProcVersion`
+- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult`、`nativeDetectHook` 等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectBootPatch`、`nativeDetectLsposed`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeCheckCgroup`、`nativeGetEnvVersion`；指纹 → `nativeGetProcVersion`
 - **检测状态**: `STATUS_NORMAL=0`(绿), `STATUS_WARNING=1`(橙), `STATUS_DANGER=2`(红)；每项有 **分数**（getEarnedScore/getMaxScore），概览页显示总分百分比
 - **ABI**: 仅 `arm64-v8a`；C++17；Android 15+ 使用 16KB 页面对齐
 - **导航**: 底部 TabLayout + ViewPager2 左右滑动，三页：概览、调试检测、环境检测

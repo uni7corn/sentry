@@ -44,6 +44,7 @@ public class EnvDetectionManager {
     private static native String nativeGetEnvVersion();
     private static native String[] nativeDetectMagisk();
     private static native String[] nativeDetectBootloader();
+    private static native String[] nativeDetectBootPatch();
     private static native String[] nativeDetectLsposed();
     private static native String[] nativeDetectSuspiciousFiles();
     private static native String[] nativeDetectEmulator(String hardware, String product, String device, String brand);
@@ -59,6 +60,7 @@ public class EnvDetectionManager {
     public List<DetectionResult> runAllDetections() {
         List<DetectionResult> results = new ArrayList<>();
         results.add(detectBootloader());
+        results.add(detectBootPatch());
         results.add(detectRoot());
         results.add(detectLsposed());
         results.add(detectPlayIntegrity());
@@ -76,6 +78,38 @@ public class EnvDetectionManager {
                 "Bootloader locked or unknown", "Bootloader appears locked");
     }
 
+    /**
+     * Boot image integrity: /proc/cmdline AVB (verifiedbootstate) + dm-verity.
+     * Magisk patches boot.img → verifiedbootstate=orange.
+     * eng/userdebug builds: downgrade DANGER to WARNING to reduce false positives.
+     */
+    private DetectionResult detectBootPatch() {
+        String[] raw = nativeDetectBootPatch();
+        if (raw == null || raw.length < 2) {
+            return new DetectionResult("Boot Image Integrity", "Check failed", DetectionResult.STATUS_WARNING);
+        }
+        int status = DetectionResult.STATUS_NORMAL;
+        try {
+            status = Integer.parseInt(raw[0]);
+        } catch (NumberFormatException ignored) { }
+
+        /* eng/userdebug: downgrade DANGER to WARNING (engineering ROMs often show orange) */
+        String buildType = Build.TYPE;
+        if (status == DetectionResult.STATUS_DANGER &&
+                (buildType != null && (buildType.equals("eng") || buildType.equals("userdebug")))) {
+            status = DetectionResult.STATUS_WARNING;
+        }
+
+        String summary = raw[1];
+        List<String> details = raw.length > 2
+                ? Arrays.asList(Arrays.copyOfRange(raw, 2, raw.length))
+                : Collections.emptyList();
+
+        DetectionResult result = new DetectionResult("Boot Image Integrity", summary, status, 15);
+        result.setDetails(details.isEmpty() ? Collections.singletonList("AVB state from /proc/cmdline") : details);
+        return result;
+    }
+
     private DetectionResult detectPlayIntegrity() {
         PlayIntegrityHelper helper = new PlayIntegrityHelper(context, null);
         String[] raw = helper.runDetectionSync();
@@ -90,7 +124,7 @@ public class EnvDetectionManager {
         List<String> details = raw.length > 2
                 ? Collections.singletonList(raw[2])
                 : Collections.emptyList();
-        DetectionResult result = new DetectionResult("Play Integrity", summary, status);
+        DetectionResult result = new DetectionResult("Play Integrity", summary, status, 15);
         result.setDetails(details);
         return result;
     }
@@ -142,7 +176,7 @@ public class EnvDetectionManager {
         String summary = (status == DetectionResult.STATUS_DANGER || !details.isEmpty())
                 ? "Magisk or root indicator(s) found"
                 : "No Magisk detected";
-        DetectionResult result = new DetectionResult("Magisk / Root", summary, status);
+        DetectionResult result = new DetectionResult("Magisk / Root", summary, status, 12);
         result.setDetails(details.isEmpty() ? Collections.singletonList("No root binaries or Magisk detected") : details);
         return result;
     }
@@ -269,7 +303,8 @@ public class EnvDetectionManager {
         String summary = status == DetectionResult.STATUS_NORMAL
                 ? "ADB debugging disabled"
                 : "ADB debugging enabled or port 5555 open";
-        return new DetectionResult("ADB Debug", summary, status, details);
+        /* warnOnly=true: 只做警告不扣分，部分设备需开启 ADB 做开发调试 */
+        return new DetectionResult("ADB Debug", summary, status, 5, details, true);
     }
 
     private DetectionResult detectSuspiciousFiles() {
@@ -312,6 +347,7 @@ public class EnvDetectionManager {
                 "Multi-instance",
                 status == DetectionResult.STATUS_NORMAL ? "No multi-instance detected" : "Multi-instance app detected",
                 status,
+                5,
                 details
         );
     }
@@ -372,6 +408,7 @@ public class EnvDetectionManager {
                 "Container / Virtualization",
                 status == DetectionResult.STATUS_NORMAL ? "No container detected" : "Container or virtualization detected",
                 status,
+                8,
                 issues.isEmpty() ? Collections.singletonList("No container or virtual app detected") : issues
         );
     }

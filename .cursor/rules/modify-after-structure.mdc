@@ -1,5 +1,5 @@
 ---
-description: 修改代码前先读取项目结构 Skill，重大变更后须更新结构 Skill
+description: 修改代码前先读取项目结构 Skill，重大变更后须更新结构 Skill 与 doc/DETECTION_SPEC.md
 alwaysApply: true
 ---
 
@@ -14,15 +14,19 @@ alwaysApply: true
 
 ## 重大变更后必做
 
-若本次修改包含以下任一情况，视为**较大变动**，修改完成后必须**更新结构 Skill**（以及必要时项目根目录的 `PROJECT_ARCHITECTURE.md`、`ARCHITECTURE_QUICKREF.md`）：
+若本次修改包含以下任一情况，视为**较大变动**，修改完成后必须**更新结构 Skill**、**更新检测规范文档 `doc/DETECTION_SPEC.md`**（以及必要时项目根目录的 `PROJECT_ARCHITECTURE.md`、`ARCHITECTURE_QUICKREF.md`）：
 
 - 新增或删除模块、包、重要 Java 类或 C++ 检测器
 - 目录层级或关键文件路径变更
 - 新增/删除检测项、Activity 或入口
 - 构建配置变更（如 CMake 源列表、新 ABI、Gradle 模块）
+- 检测逻辑、评分机制、实现方式等变更
 
 **新增检测项时**：除更新结构外，务必参考 `.cursor/rules/detection-development.mdc`，遵循 Native 优先、syscall、评分与误报控制等规范。
 
-**更新方式**：编辑 `.cursor/skills/sentry-project-structure/SKILL.md`，使其中的「目录树」和「关键路径速查」与当前仓库一致；若架构或扩展流程变化，同步更新 `PROJECT_ARCHITECTURE.md` / `ARCHITECTURE_QUICKREF.md`。
+**更新方式**：
+- 编辑 `.cursor/skills/sentry-project-structure/SKILL.md`，使其中的「目录树」和「关键路径速查」与当前仓库一致
+- 若架构或扩展流程变化，同步更新 `PROJECT_ARCHITECTURE.md` / `ARCHITECTURE_QUICKREF.md`
+- **同步更新 `doc/DETECTION_SPEC.md`**：新增/删除检测项、修改实现层或逻辑时，更新总览表、对应检测项说明、评分机制、相关文件速查等，保持规范文档与实现一致
 
 这样可保证后续 Agent 与开发者始终基于最新结构执行维护与更新。

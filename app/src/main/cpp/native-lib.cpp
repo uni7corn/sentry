@@ -16,6 +16,21 @@
 
 extern "C" {
 
+// Hook detection for Java: String[] { status, summary, detail }; enhances Xposed detection
+JNIEXPORT jobjectArray JNICALL
+Java_anti_rusda_detector_DebugDetectionManager_nativeDetectHook(JNIEnv *env, jclass clazz) {
+    bool hooked = detect_hooks();
+    int status = hooked ? 2 : 0;  /* 2 = DANGER, 0 = NORMAL */
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    jobjectArray arr = env->NewObjectArray(3, stringClass, nullptr);
+    if (!arr) return nullptr;
+    env->SetObjectArrayElement(arr, 0, env->NewStringUTF(status == 2 ? "2" : "0"));
+    env->SetObjectArrayElement(arr, 1, env->NewStringUTF(hooked ? "Hook/inline/PLT tampering detected" : "No hook detected"));
+    env->SetObjectArrayElement(arr, 2, env->NewStringUTF(hooked ? "Critical functions appear hooked or tampered" : "PLT/GOT and libc integrity OK"));
+    return arr;
+}
+
 // Memory signature result for Java: String[] { status, summary, detail0, ... } (uses syscall)
 JNIEXPORT jobjectArray JNICALL
 Java_anti_rusda_detector_DebugDetectionManager_nativeGetMemorySignatureResult(JNIEnv *env, jclass clazz) {
@@ -31,6 +46,29 @@ Java_anti_rusda_detector_DebugDetectionManager_nativeGetMemorySignatureResult(JN
     env->SetObjectArrayElement(arr, 1, env->NewStringUTF(n > 0 ? "Frida/LSPosed signatures in memory" : "No Frida/LSPosed signatures in memory"));
     if (n == 0) {
         env->SetObjectArrayElement(arr, 2, env->NewStringUTF("Memory scan completed - clean"));
+    } else {
+        for (int i = 0; i < n; i++) {
+            env->SetObjectArrayElement(arr, 2 + i, env->NewStringUTF(details[i]));
+        }
+    }
+    return arr;
+}
+
+// Frida thread detection for Java: String[] { status, summary, detail0, ... }; uses syscall
+JNIEXPORT jobjectArray JNICALL
+Java_anti_rusda_detector_DebugDetectionManager_nativeDetectFridaThreads(JNIEnv *env, jclass clazz) {
+    char details[MAX_MEMORY_DETAILS][256];
+    int n = get_frida_thread_details(details, MAX_MEMORY_DETAILS);
+    int status = (n > 0) ? 2 : 0;  /* 2 = DANGER, 0 = NORMAL */
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    int arrLen = 2 + (n > 0 ? n : 1);
+    jobjectArray arr = env->NewObjectArray(arrLen, stringClass, nullptr);
+    if (!arr) return nullptr;
+    env->SetObjectArrayElement(arr, 0, env->NewStringUTF(status == 2 ? "2" : "0"));
+    env->SetObjectArrayElement(arr, 1, env->NewStringUTF(n > 0 ? "Suspicious Frida-related thread(s) detected" : "No suspicious threads found"));
+    if (n == 0) {
+        env->SetObjectArrayElement(arr, 2, env->NewStringUTF("No Frida-related thread names in /proc/self/task"));
     } else {
         for (int i = 0; i < n; i++) {
             env->SetObjectArrayElement(arr, 2 + i, env->NewStringUTF(details[i]));

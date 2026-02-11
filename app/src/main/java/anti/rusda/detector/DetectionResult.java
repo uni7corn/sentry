@@ -17,6 +17,8 @@ public class DetectionResult {
     private int maxScore;
     private List<String> details;
     private boolean expanded;
+    /** 若为 true，WARNING 时仍给满分（只警告不扣分） */
+    private boolean warnOnly;
 
     public DetectionResult(String title, String description, int status) {
         this(title, description, status, DEFAULT_MAX_SCORE);
@@ -36,12 +38,17 @@ public class DetectionResult {
     }
 
     public DetectionResult(String title, String description, int status, int maxScore, List<String> details) {
+        this(title, description, status, maxScore, details, false);
+    }
+
+    public DetectionResult(String title, String description, int status, int maxScore, List<String> details, boolean warnOnly) {
         this.title = title;
         this.description = description;
         this.status = status;
         this.maxScore = maxScore > 0 ? maxScore : DEFAULT_MAX_SCORE;
         this.details = details != null ? details : new ArrayList<>();
         this.expanded = false;
+        this.warnOnly = warnOnly;
     }
 
     public String getTitle() {
@@ -96,13 +103,13 @@ public class DetectionResult {
         return maxScore;
     }
 
-    /** 根据状态得到该项得分：NORMAL=满分，WARNING=一半，DANGER=0 */
+    /** 根据状态得到该项得分：NORMAL=满分，WARNING=一半（warnOnly 时为满分），DANGER=0 */
     public int getEarnedScore() {
         switch (status) {
             case STATUS_NORMAL:
                 return maxScore;
             case STATUS_WARNING:
-                return maxScore / 2;
+                return warnOnly ? maxScore : (maxScore / 2);
             case STATUS_DANGER:
             default:
                 return 0;
