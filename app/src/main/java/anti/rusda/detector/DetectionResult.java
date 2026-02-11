@@ -8,24 +8,38 @@ public class DetectionResult {
     public static final int STATUS_WARNING = 1;
     public static final int STATUS_DANGER = 2;
 
+    /** 该项满分（用于计算总分，默认 10） */
+    public static final int DEFAULT_MAX_SCORE = 10;
+
     private String title;
     private String description;
     private int status;
+    private int maxScore;
     private List<String> details;
     private boolean expanded;
 
     public DetectionResult(String title, String description, int status) {
+        this(title, description, status, DEFAULT_MAX_SCORE);
+    }
+
+    public DetectionResult(String title, String description, int status, int maxScore) {
         this.title = title;
         this.description = description;
         this.status = status;
+        this.maxScore = maxScore > 0 ? maxScore : DEFAULT_MAX_SCORE;
         this.details = new ArrayList<>();
         this.expanded = false;
     }
 
     public DetectionResult(String title, String description, int status, List<String> details) {
+        this(title, description, status, DEFAULT_MAX_SCORE, details);
+    }
+
+    public DetectionResult(String title, String description, int status, int maxScore, List<String> details) {
         this.title = title;
         this.description = description;
         this.status = status;
+        this.maxScore = maxScore > 0 ? maxScore : DEFAULT_MAX_SCORE;
         this.details = details != null ? details : new ArrayList<>();
         this.expanded = false;
     }
@@ -75,6 +89,24 @@ public class DetectionResult {
 
     public void setExpanded(boolean expanded) {
         this.expanded = expanded;
+    }
+
+    /** 该项满分 */
+    public int getMaxScore() {
+        return maxScore;
+    }
+
+    /** 根据状态得到该项得分：NORMAL=满分，WARNING=一半，DANGER=0 */
+    public int getEarnedScore() {
+        switch (status) {
+            case STATUS_NORMAL:
+                return maxScore;
+            case STATUS_WARNING:
+                return maxScore / 2;
+            case STATUS_DANGER:
+            default:
+                return 0;
+        }
     }
 
     public String getStatusText() {

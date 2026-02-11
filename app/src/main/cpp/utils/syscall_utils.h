@@ -15,6 +15,11 @@ int my_open(const char *pathname, int flags, mode_t mode);
 int my_close(int fd);
 int my_access(const char *pathname, int mode);
 
+// Socket syscalls (bypass libc hooks for connect/socket/close)
+int my_socket(int domain, int type, int protocol);
+int my_connect(int sockfd, const void *addr, unsigned int addrlen);
+int my_setsockopt(int sockfd, int level, int optname, const void *optval, unsigned int optlen);
+
 // String operations
 char *my_strcpy(char *dest, const char *src);
 char *my_strncpy(char *dest, const char *src, size_t n);

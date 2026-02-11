@@ -3,9 +3,14 @@
     <!-- App -->
     <string name="app_name">Sentry</string>
 
-    <!-- Navigation -->
+    <!-- Navigation / Tabs -->
     <string name="title_scan">Scan</string>
     <string name="title_settings">Settings</string>
+    <string name="tab_overview">Overview</string>
+    <string name="tab_debug">Debug</string>
+    <string name="tab_environment">Environment</string>
+    <string name="security_score">Security score</string>
+    <string name="device_info">Device info</string>
 
     <!-- Status -->
     <string name="status_healthy">Healthy</string>

@@ -14,6 +14,32 @@
 
 extern "C" {
 
+// Port scan result for Java: String[] { status, summary, detail0, detail1, ... }
+JNIEXPORT jobjectArray JNICALL
+Java_anti_rusda_detector_DebugDetectionManager_nativeGetFridaPortScanResult(JNIEnv *env, jclass clazz) {
+    detect_frida_ports();
+    int n = get_frida_port_open_count();
+    int status = (n > 0) ? 2 : 0;  // 2 = DANGER, 0 = NORMAL
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    int arrLen = 2 + (n > 0 ? n : 1);  // status, summary, then n details or 1 "All closed"
+    jobjectArray arr = env->NewObjectArray(arrLen, stringClass, nullptr);
+    if (!arr) return nullptr;
+    env->SetObjectArrayElement(arr, 0, env->NewStringUTF(status == 2 ? "2" : "0"));
+    env->SetObjectArrayElement(arr, 1, env->NewStringUTF(n > 0 ? "Frida port(s) detected" : "No Frida ports detected"));
+    if (n == 0) {
+        env->SetObjectArrayElement(arr, 2, env->NewStringUTF("All Frida default ports are closed"));
+    } else {
+        for (int i = 0; i < n; i++) {
+            int port = get_frida_port_open_at(i);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Port %d is open (Frida default)", port);
+            env->SetObjectArrayElement(arr, 2 + i, env->NewStringUTF(buf));
+        }
+    }
+    return arr;
+}
+
 // Thread detection
 JNIEXPORT jboolean JNICALL
 Java_anti_rusda_MainActivity_nativeDetectFridaThread(JNIEnv *env, jobject thiz) {

@@ -4,6 +4,19 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+// Android NDK may not expose socket syscall numbers; use Linux aarch64 values
+#if defined(__aarch64__)
+#ifndef __NR_socket
+#define __NR_socket   198
+#define __NR_connect  203
+#define __NR_setsockopt 208
+#endif
+#elif defined(__arm__)
+#ifndef __NR_socketcall
+#define __NR_socketcall 281
+#endif
+#endif
+
 // Architecture-specific syscall implementation
 #if defined(__arm__)
 static inline long do_syscall(long number, long arg1, long arg2, long arg3, long arg4, long arg5, long arg6) {
@@ -100,10 +113,25 @@ int my_access(const char *pathname, int mode) {
 #if defined(__NR_access)
     return do_syscall(__NR_access, (long)pathname, mode, 0, 0, 0, 0);
 #else
-    // Fallback to faccessat with AT_FDCWD (-100)
     return do_syscall(__NR_faccessat, -100, (long)pathname, mode, 0, 0, 0);
 #endif
 }
+
+#if defined(__NR_socket) && defined(__NR_connect) && defined(__NR_setsockopt)
+int my_socket(int domain, int type, int protocol) {
+    return (int) do_syscall(__NR_socket, domain, type, protocol, 0, 0, 0);
+}
+int my_connect(int sockfd, const void *addr, unsigned int addrlen) {
+    return (int) do_syscall(__NR_connect, sockfd, (long)addr, addrlen, 0, 0, 0);
+}
+int my_setsockopt(int sockfd, int level, int optname, const void *optval, unsigned int optlen) {
+    return (int) do_syscall(__NR_setsockopt, sockfd, level, optname, (long)optval, optlen, 0);
+}
+#else
+int my_socket(int domain, int type, int protocol) { (void)domain;(void)type;(void)protocol; return -1; }
+int my_connect(int sockfd, const void *addr, unsigned int addrlen) { (void)sockfd;(void)addr;(void)addrlen; return -1; }
+int my_setsockopt(int sockfd, int level, int optname, const void *optval, unsigned int optlen) { (void)sockfd;(void)level;(void)optname;(void)optval;(void)optlen; return -1; }
+#endif
 
 // String operations (reimplementations to avoid libc)
 char *my_strcpy(char *dest, const char *src) {

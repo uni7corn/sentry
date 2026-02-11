@@ -3,9 +3,14 @@
     <!-- App -->
     <string name="app_name">Sentry</string>
 
-    <!-- Navigation -->
+    <!-- Navigation / Tabs -->
     <string name="title_scan">检测</string>
     <string name="title_settings">设置</string>
+    <string name="tab_overview">概览</string>
+    <string name="tab_debug">调试检测</string>
+    <string name="tab_environment">环境检测</string>
+    <string name="security_score">安全分数</string>
+    <string name="device_info">设备信息</string>
 
     <!-- Status -->
     <string name="status_healthy">正常</string>

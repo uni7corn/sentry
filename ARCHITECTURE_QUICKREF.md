@@ -3,25 +3,23 @@
 ## 项目概览
 ```
 Sentry (anti.rusda)
-├── Java Layer (Presentation + Detection Engine)
-│   ├── MainActivity          - 主界面/扫描控制
-│   ├── SettingsActivity      - 设置界面
-│   ├── DetectionManager      - 12种检测方法
-│   └── DetectionResult       - 结果数据模型
+├── UI: 底部 Tab + ViewPager2（3 页）
+│   ├── 概览 (Overview)   - 设备信息 + 安全分数 + 一键扫描
+│   ├── 调试检测 (Debug) - Frida/Xposed/ptrace/端口等
+│   └── 环境检测 (Env)   - Root/Bootloader/模拟器/SELinux 等
 │
-├── Native Layer (C++)
-│   ├── libantifrida.so       - 原生检测库
-│   ├── thread_detector       - /proc/self/task扫描
-│   ├── port_scanner          - TCP端口扫描
-│   ├── memory_scanner        - /proc/self/maps分析
-│   ├── hook_detector         - 内联Hook检测
-│   ├── anti_debug            - 反调试检测
-│   └── syscall_utils         - 直接系统调用
+├── Java Layer
+│   ├── MainActivity / OverviewFragment / DebugFragment / EnvironmentFragment
+│   ├── DebugDetectionManager  - 调试类检测（依赖 libantifrida.so）
+│   ├── EnvDetectionManager   - 环境类检测（依赖 libenvdetect.so）
+│   ├── DetectionManager      - 兼容入口，合并两类检测
+│   └── DetectionResult      - 结果模型（含 score/maxScore）
 │
-└── Resources
-    ├── 2种语言 (en/zh)
-    ├── 3个布局
-    └── Material Design 3主题
+├── Native Layer（两个 so）
+│   ├── libantifrida.so  - 调试检测：thread/port/memory/hook/anti_debug + JNI(native-lib.cpp)
+│   └── libenvdetect.so  - 环境检测桩：native-lib-env.cpp
+│
+└── Resources：2 种语言 (en/zh)，Material Design 3
 ```
 
 ## 文件位置速查
@@ -30,17 +28,22 @@ Sentry (anti.rusda)
 | 类 | 路径 |
 |----|------|
 | MainActivity | `app/src/main/java/anti/rusda/MainActivity.java` |
+| OverviewFragment | `app/src/main/java/anti/rusda/OverviewFragment.java` |
+| DebugFragment | `app/src/main/java/anti/rusda/DebugFragment.java` |
+| EnvironmentFragment | `app/src/main/java/anti/rusda/EnvironmentFragment.java` |
 | SettingsActivity | `app/src/main/java/anti/rusda/SettingsActivity.java` |
-| SentryApp | `app/src/main/java/anti/rusda/SentryApp.java` |
-| LocaleHelper | `app/src/main/java/anti/rusda/LocaleHelper.java` |
+| DebugDetectionManager | `app/src/main/java/anti/rusda/detector/DebugDetectionManager.java` |
+| EnvDetectionManager | `app/src/main/java/anti/rusda/detector/EnvDetectionManager.java` |
 | DetectionManager | `app/src/main/java/anti/rusda/detector/DetectionManager.java` |
 | DetectionResult | `app/src/main/java/anti/rusda/detector/DetectionResult.java` |
+| MainPagerAdapter | `app/src/main/java/anti/rusda/ui/MainPagerAdapter.java` |
 | DetectionAdapter | `app/src/main/java/anti/rusda/ui/adapter/DetectionAdapter.java` |
 
 ### C++ 源码
 | 模块 | 路径 |
 |------|------|
-| JNI Bridge | `app/src/main/cpp/native-lib.cpp` |
+| JNI 调试库 | `app/src/main/cpp/native-lib.cpp` |
+| JNI 环境库 | `app/src/main/cpp/native-lib-env.cpp` |
 | Thread Detector | `app/src/main/cpp/detector/thread_detector.cpp` |
 | Port Scanner | `app/src/main/cpp/detector/port_scanner.cpp` |
 | Memory Scanner | `app/src/main/cpp/detector/memory_scanner.cpp` |
@@ -51,7 +54,8 @@ Sentry (anti.rusda)
 ### 资源文件
 | 类型 | 路径 |
 |------|------|
-| 主布局 | `app/src/main/res/layout/activity_main.xml` |
+| 主布局 | `app/src/main/res/layout/activity_main.xml` (ViewPager2 + TabLayout) |
+| 概览/调试/环境 | `fragment_overview.xml`, `fragment_debug.xml`, `fragment_environment.xml` |
 | 设置布局 | `app/src/main/res/layout/activity_settings.xml` |
 | 项布局 | `app/src/main/res/layout/item_detection.xml` |
 | 英文字符串 | `app/src/main/res/values/strings.xml` |
@@ -70,22 +74,31 @@ Sentry (anti.rusda)
 | ProGuard | `app/proguard-rules.pro` |
 | 应用清单 | `app/src/main/AndroidManifest.xml` |
 
-## 12项检测清单
+## 检测项清单（按 Tab 分）
 
-| # | 检测项 | 方法名 | 状态 | 检测目标 |
-|---|--------|--------|------|----------|
-| 1 | Frida线程 | `detectFridaThreads()` | 🔴 | gmain, gdbus, frida-agent... |
-| 2 | Frida端口 | `detectFridaPorts()` | 🔴 | 27042, 27043, 27044 |
-| 3 | 内存签名 | `detectMemorySignatures()` | 🔴 | frida, gum-js, gthread |
-| 4 | 命名管道 | `detectNamedPipes()` | 🔴 | /proc/self/net/unix |
-| 5 | 调试模式 | `detectDebugMode()` | 🟡 | Debug.isDebuggerConnected() |
-| 6 | Root检测 | `detectRoot()` | 🟡 | su, Magisk |
-| 7 | 可疑文件 | `detectSuspiciousFiles()` | 🔴 | /data/local/tmp/frida* |
-| 8 | Ptrace | `detectPtraceStatus()` | 🔴 | TracerPid |
-| 9 | 模拟器 | `detectEmulator()` | 🟡 | QEMU, BlueStacks |
-| 10 | SELinux | `detectSELinuxStatus()` | 🟡 | enforce/permissive |
-| 11 | 库完整性 | `checkLibraryIntegrity()` | 🔴 | Xposed框架 |
-| 12 | 多实例 | `checkProcessStatus()` | 🟡 | dual/clone/parallel |
+**调试检测 (DebugDetectionManager, libantifrida.so)**  
+| # | 检测项 | 检测目标 |
+|---|--------|----------|
+| 1 | Frida 线程 | gmain, gdbus, frida-agent... |
+| 2 | Frida 端口 | 27042, 27043, 27044 (Native syscall) |
+| 3 | 内存签名 | frida, gum-js, gthread |
+| 4 | 命名管道 | /proc/self/net/unix |
+| 5 | Ptrace/IDA 附加 | TracerPid |
+| 6 | 调试器附加 | Debug.isDebuggerConnected() |
+| 7 | Xposed/Hook | XposedBridge |
+
+**环境检测 (EnvDetectionManager, libenvdetect.so)**  
+| # | 检测项 | 检测目标 |
+|---|--------|----------|
+| 1 | Bootloader | ro.boot.verifiedbootstate / flash.locked |
+| 2 | Root | su, Magisk |
+| 3 | 可疑文件 | /data/local/tmp/frida* 等 |
+| 4 | 模拟器 | QEMU, BlueStacks, build 属性 |
+| 5 | SELinux | enforce/permissive |
+| 6 | 应用可调试 | FLAG_DEBUGGABLE |
+| 7 | 多实例 | dual/clone/parallel 路径 |
+
+每项有 **分数**：NORMAL=满分，WARNING=半分的，DANGER=0；概览页显示总分百分比（0–100）。
 
 ## 状态颜色
 
@@ -115,32 +128,18 @@ STATUS_DANGER  (2)  → #FFE53935 (红色)
 
 ### 添加新检测项
 
-```java
-// DetectionManager.java
-private DetectionResult detectNewFeature() {
-    List<String> findings = new ArrayList<>();
-    int status = DetectionResult.STATUS_NORMAL;
+- **调试类**：在 `DebugDetectionManager.java` 增加方法并加入 `runAllDetections()`；若需 Native 则在 `native-lib.cpp` 增加 JNI。
+- **环境类**：在 `EnvDetectionManager.java` 增加方法并加入 `runAllDetections()`；可选 `native-lib-env.cpp`。
+- 使用 `DetectionResult(title, description, status)` 或带 `maxScore` 的构造；分数会参与概览页总分计算。
 
-    // 检测逻辑...
-
-    DetectionResult result = new DetectionResult(
-        "New Feature Detection",
-        findings.isEmpty() ? "Clean" : "Detected",
-        status
-    );
-    result.setDetails(findings);
-    return result;
-}
-```
-
-### 添加JNI接口
+### 添加 JNI 接口
 
 ```cpp
-// native-lib.cpp
-extern "C" JNIEXPORT jboolean JNICALL
-Java_anti_rusda_MainActivity_nativeDetectNewFeature(JNIEnv* env, jobject thiz) {
-    return detect_new_feature();
-}
+// 调试检测 → native-lib.cpp，类名 DebugDetectionManager
+Java_anti_rusda_detector_DebugDetectionManager_nativeXxx(...)
+
+// 环境检测 → native-lib-env.cpp，类名 EnvDetectionManager
+Java_anti_rusda_detector_EnvDetectionManager_nativeXxx(...)
 ```
 
 ### 添加字符串
