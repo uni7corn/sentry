@@ -108,7 +108,8 @@ public class KeyAttestationHelper {
                     break;
                 }
             }
-            if (!hasKnownRoot && chain.length > 1) {
+            /* Only warn on Google devices - OEM devices (Xiaomi, Samsung, etc.) use their own attestation CA */
+            if (!hasKnownRoot && chain.length > 1 && isGoogleDevice()) {
                 details.add("Certificate chain does not contain known root (Android Keystore/Google/RKP)");
                 statusFromChain = Math.max(statusFromChain, DetectionResult.STATUS_WARNING);
             }
@@ -213,6 +214,12 @@ public class KeyAttestationHelper {
                     "Exception: " + msg
             };
         }
+    }
+
+    private static boolean isGoogleDevice() {
+        String brand = Build.BRAND != null ? Build.BRAND : "";
+        String manufacturer = Build.MANUFACTURER != null ? Build.MANUFACTURER : "";
+        return brand.toLowerCase().contains("google") || manufacturer.toLowerCase().contains("google");
     }
 
     private static boolean isLikelyEmulator() {
