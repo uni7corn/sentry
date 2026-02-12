@@ -99,20 +99,7 @@ public class KeyAttestationHelper {
                 details.add("Certificate chain too short (expected 2+, got " + chain.length + ")");
                 statusFromChain = DetectionResult.STATUS_WARNING;
             }
-            boolean hasKnownRoot = false;
-            for (int i = 1; i < chain.length; i++) {
-                X509Certificate cert = (X509Certificate) chain[i];
-                String issuer = cert.getIssuerDN().getName();
-                if (issuer != null && (issuer.contains("Android Keystore") || issuer.contains("Google") || issuer.contains("RKP"))) {
-                    hasKnownRoot = true;
-                    break;
-                }
-            }
-            /* Only warn on Google devices - OEM devices (Xiaomi, Samsung, etc.) use their own attestation CA */
-            if (!hasKnownRoot && chain.length > 1 && isGoogleDevice()) {
-                details.add("Certificate chain does not contain known root (Android Keystore/Google/RKP)");
-                statusFromChain = Math.max(statusFromChain, DetectionResult.STATUS_WARNING);
-            }
+            /* Skip issuer root check - causes false positives on both Google and OEM devices due to format/hierarchy variations */
 
             X509Certificate leaf = (X509Certificate) chain[0];
             byte[] extValue = leaf.getExtensionValue(ATTESTATION_EXTENSION_OID);
@@ -214,12 +201,6 @@ public class KeyAttestationHelper {
                     "Exception: " + msg
             };
         }
-    }
-
-    private static boolean isGoogleDevice() {
-        String brand = Build.BRAND != null ? Build.BRAND : "";
-        String manufacturer = Build.MANUFACTURER != null ? Build.MANUFACTURER : "";
-        return brand.toLowerCase().contains("google") || manufacturer.toLowerCase().contains("google");
     }
 
     private static boolean isLikelyEmulator() {
