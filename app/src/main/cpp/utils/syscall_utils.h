@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ ssize_t my_write(int fd, const void *buf, size_t count);
 int my_open(const char *pathname, int flags, mode_t mode);
 int my_close(int fd);
 int my_access(const char *pathname, int mode);
+ssize_t my_lseek(int fd, off_t offset, int whence);
 
 // Socket syscalls (bypass libc hooks for connect/socket/close)
 int my_socket(int domain, int type, int protocol);

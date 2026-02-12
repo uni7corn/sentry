@@ -104,7 +104,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Xposed/LSPosed/EdXposed 框架及内联/PLT Hook、特征路径与注入 fd |
 | **实现层** | Java + Native（`hook_detector.cpp`、`xposed_detector.cpp`、`memory_scanner.cpp`）；入口方法名 `checkLibraryIntegrity(Context)` |
-| **实现** | 1) **Java**（检测**当前进程**是否被 hook，非「应用安装」）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `XposedHelpers`/`XposedBridge` 的 `findAndHookMethod`、`hookAllMethods` 等关键方法；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed`，尝试加载 `org.lsposed.lspd.core.Main`，检查 parent 链含 Xposed/Lsp（需绕过 Hidden API）。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：检测 Xposed 路径、**LSPosed 路径**（`/data/adb/lspd`、`/data/adb/modules/zygisk_lsposed`）、**Riru 路径**、**ro.dalvik.vm.native.bridge** 可疑值、**Zygisk fexecve**（`/proc/self/exe` 为 `/dev/fd/X`）、**LD_PRELOAD/MAGISKTMP** 环境变量、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：`/proc/self/maps` 中匹配 `libxposed`、`XposedBridge`、`XposedHelpers`、`org.lsposed`、`zygisk_lsposed`、`zygisk` 等签名；⑦ 内联 Hook、PLT/GOT、libc 完整性（`hook_detector.cpp`）。 |
+| **实现** | 1) **Java**（检测**当前进程**是否被 hook，非「应用安装」）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `XposedHelpers`/`XposedBridge` 的 `findAndHookMethod`、`hookAllMethods` 等关键方法；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed`，尝试加载 `org.lsposed.lspd.core.Main`，检查 parent 链含 Xposed/Lsp（需绕过 Hidden API）。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：检测 Xposed 路径、**LSPosed 路径**（`/data/adb/lspd`、`/data/adb/modules/zygisk_lsposed`）、**Riru 路径**、**ro.dalvik.vm.native.bridge** 可疑值、**Zygisk fexecve**（`/proc/self/exe` 为 `/dev/fd/X`）、**LD_PRELOAD/MAGISKTMP** 环境变量、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：`/proc/self/maps` 中匹配 `libxposed`、`XposedBridge`、`XposedHelpers`、`org.lsposed`、`zygisk_lsposed`、`zygisk` 等签名；⑦ 内联 Hook、PLT/GOT、libc 完整性（`hook_detector.cpp`）；⑧ **LR 寄存器检测**（`hook_detector.cpp`，ARM64）：在 `detect_hooks()` 入口读取 LR(x30)，若返回地址不在本模块（libantidebug.so）范围内则判为 trampoline 式 inline hook（Frida/Dobby/xhook 等），使用 syscall 解析 `/proc/self/maps` 获取模块边界。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
 
 ---
@@ -136,11 +136,11 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 | 属性     | 说明 |
 |----------|------|
-| **目的** | 检测 Magisk Zygisk、ZygiskNext、LSPosed 等通过内存注入的进程内特征 |
+| **目的** | 检测 Magisk Zygisk、ZygiskNext、LSPosed、Frida 等通过内存注入的进程内特征 |
 | **实现层** | Native（`env_detector.cpp`，`env_detect_zygisk_injection`） |
-| **实现** | 1) **Smaps 检测**：读取 `/proc/self/smaps`，解析可执行段（`r-xp`/`r-x`），若 `.so` 或关键系统库（`libart.so`、`libc.so`、`libc++.so`）映射段中 `Private_Dirty > 0` 则判为可疑注入（正常代码段不应有 Private_Dirty）；显式针对 libart/libc 提高对 Frida inline hook 的命中率；2) **VMap 检测**：扫描 `/proc/self/maps`，对匿名可执行映射（`r-x` + `anon`）读取内存，搜索 `zygisk_module_entry`、`libzygisk.so`、`ZygiskModule`、`zygisk` 等特征字符串。使用 syscall（`my_open`/`my_read`）绕过 libc。 |
+| **实现** | 1) **Smaps 检测**：读取 `/proc/self/smaps`，解析可执行段（`r-xp`/`r-x`），若 `.so` 或关键系统库（`libart.so`、`libc.so`、`libc++.so`、`libselinux.so`、`libandroid_runtime.so`）映射段中 `Private_Dirty > 0` 则判为可疑注入（正常代码段不应有 Private_Dirty）；显式针对 libart/libc/libselinux/libandroid_runtime 提高对 Frida inline hook 的命中率（frida-server 全局 hook zygote 时必改以上库）；2) **VMap 检测**：扫描 `/proc/self/maps`，对匿名可执行映射（`r-x` + `anon`）读取内存，搜索 `zygisk_module_entry`、`libzygisk.so`、`ZygiskModule`、`zygisk` 等特征字符串；3) **Pagemap bit 61 (soft-dirty) 检测**：读取 `/proc/self/pagemap`，检查 libc 中 `fork`/`vfork`/`signal` 函数所在页的 bit 61（soft-dirty）是否置位；Frida inline hook 触发 COW 后该位永久置位，内核管理无法伪造。使用 syscall（`my_open`/`my_read`/`my_lseek`）绕过 libc。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
-| **设计说明** | 参考 Android-App-Memory-Analysis、JingMatrixDemo；JIT 可产生 Private_Dirty，需结合白名单与阈值；多种方法联合降低误报 |
+| **设计说明** | 参考 Android-App-Memory-Analysis、JingMatrixDemo、2025 年 meta；Private_Dirty + Pagemap soft-dirty 为「永久性指纹」几乎无法绕过；JIT 可产生 Private_Dirty，需结合白名单与阈值；多种方法联合降低误报 |
 
 ### 3.4 Dangerous Apps
 
@@ -349,7 +349,7 @@ UI 展示（OverviewFragment）
 |--------------------|------------|--------------------|
 | detectBootloader | `nativeDetectBootloader` + `KeyAttestationHelper.runAttestationSync()` | `env_detect_bootloader` 与 Java Key Attestation |
 | detectRoot | `nativeDetectMagisk` | `env_detect_magisk` |
-| detectZygiskInjection | `nativeDetectZygiskInjection` | `env_detect_zygisk_injection`（Smaps + VMap） |
+| detectZygiskInjection | `nativeDetectZygiskInjection` | `env_detect_zygisk_injection`（Smaps + VMap + Pagemap bit 61） |
 | detectXposedModules（Dangerous Apps） | `nativeVerifyXposedModules` | Java 双路径获取应用列表 + Native 校验 APK（assets/xposed_init）、modules.list |
 | detectSuspiciousFiles | `nativeDetectSuspiciousFiles` | `env_detect_suspicious_files` |
 | detectEmulator | `nativeDetectEmulator` | `env_detect_emulator_files` |
@@ -370,7 +370,7 @@ UI 展示（OverviewFragment）
 | Memory Signatures | ⭐⭐⭐⭐ | Syscall + 自实现字符串函数 |
 | Frida Threads (Native) | ⭐⭐⭐⭐ | Syscall，难 Hook |
 | Magisk/Root (Native) | ⭐⭐⭐⭐ | Syscall 文件检测 |
-| Xposed (Java+Native) | ⭐⭐⭐ | 反射 + Native 双检测 |
+| Xposed (Java+Native) | ⭐⭐⭐⭐ | 反射 + Native 双检测 + LR 寄存器检测（ARM64） |
 | Container (Native cgroup) | ⭐⭐⭐ | 需伪造 cgroup 环境 |
 | Debugger Attached | ⭐⭐ | 单 API 调用，易被 Hook |
 | Ptrace | ⭐⭐ | 读取 /proc，可被 Hook |
@@ -381,7 +381,7 @@ UI 展示（OverviewFragment）
 
 | 目的             | 对应检测项 |
 |------------------|------------|
-| 防 Frida 注入    | Frida Threads、Frida Ports、Memory Signatures、Named Pipes、Suspicious Files |
+| 防 Frida 注入    | Frida Threads、Frida Ports、Memory Signatures、Named Pipes、Suspicious Files、Zygisk Injection（Smaps Private_Dirty + Pagemap soft-dirty） |
 | 防调试器附加     | Ptrace、Debugger Attached |
 | 防 Root/Hook     | Magisk/Root、Zygisk Injection、Xposed（含 LSPosed 路径/env）、Dangerous Apps、Bootloader（含 Key Attestation） |
 | 设备完整性       | Bootloader（含 Key Attestation）、Kernel Patch |
@@ -405,7 +405,7 @@ UI 展示（OverviewFragment）
 | 线程检测     | `app/src/main/cpp/detector/thread_detector.cpp` |
 | 端口扫描     | `app/src/main/cpp/detector/port_scanner.cpp` |
 | 内存扫描     | `app/src/main/cpp/detector/memory_scanner.cpp` |
-| Hook 检测（内联/PLT/GOT） | `app/src/main/cpp/detector/hook_detector.cpp` |
+| Hook 检测（内联/PLT/GOT/LR 寄存器） | `app/src/main/cpp/detector/hook_detector.cpp` |
 | Xposed 路径/fd | `app/src/main/cpp/detector/xposed_detector.cpp` |
 | 环境检测 C++（Magisk/Bootloader/Zygisk/模拟器等） | `app/src/main/cpp/detector/env_detector.cpp` |
 | Syscall 工具 | `app/src/main/cpp/utils/syscall_utils.cpp` |
@@ -548,10 +548,11 @@ bool detect_frida_ports(void) {
 }
 ```
 
-### 12.6 Native 层：环境检测（Magisk、可疑文件、Cgroup）
+### 12.6 Native 层：环境检测（Magisk、Zygisk/Frida、可疑文件、Cgroup）
 
 **文件**：`app/src/main/cpp/detector/env_detector.cpp`
 
+- **Zygisk/Frida 注入**：① Smaps：`my_open`/`my_read` 读 `/proc/self/smaps`，r-xp 段中 `Private_Dirty > 0` 且为关键库（libart、libc、libselinux、libandroid_runtime）→ 可疑；② VMap：匿名可执行映射搜 `zygisk` 等特征；③ **Pagemap**：`my_open`/`my_lseek`/`my_read` 读 `/proc/self/pagemap`，检查 libc 中 `fork`/`vfork`/`signal` 所在页的 bit 61（soft-dirty），置位表示 COW 曾发生（Frida 指纹）。
 - **Magisk**：`my_access`/`file_exists` 检测路径存在性，避免直接用 libc open。
 
 ```cpp
@@ -660,4 +661,4 @@ return new DetectionResult("ADB Debug", summary, status, 5, details, true);  // 
 
 **文件**：`app/src/main/cpp/utils/syscall_utils.h` / `syscall_utils.cpp`
 
-- 提供：`my_open`、`my_read`、`my_close`、`my_access`、`my_socket`、`my_connect`、`my_strstr`、`my_strcasestr`、`my_strcmp` 等，内部使用架构对应 syscall 号（如 `__NR_openat`、`__NR_read`），避免经过 libc 从而降低被 Frida/Xposed Hook 的概率。
+- 提供：`my_open`、`my_read`、`my_close`、`my_lseek`、`my_access`、`my_socket`、`my_connect`、`my_strstr`、`my_strcasestr`、`my_strcmp` 等，内部使用架构对应 syscall 号（如 `__NR_openat`、`__NR_read`、`__NR_lseek`），避免经过 libc 从而降低被 Frida/Xposed Hook 的概率。

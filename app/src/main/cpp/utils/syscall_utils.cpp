@@ -11,6 +11,9 @@
 #define __NR_connect  203
 #define __NR_setsockopt 208
 #endif
+#ifndef __NR_lseek
+#define __NR_lseek    62
+#endif
 #elif defined(__arm__)
 #ifndef __NR_socketcall
 #define __NR_socketcall 281
@@ -116,6 +119,19 @@ int my_access(const char *pathname, int mode) {
     return do_syscall(__NR_faccessat, -100, (long)pathname, mode, 0, 0, 0);
 #endif
 }
+
+#if defined(__NR_lseek)
+ssize_t my_lseek(int fd, off_t offset, int whence) {
+    return (ssize_t) do_syscall(__NR_lseek, fd, (long)offset, whence, 0, 0, 0);
+}
+#else
+ssize_t my_lseek(int fd, off_t offset, int whence) {
+    (void)fd;
+    (void)offset;
+    (void)whence;
+    return -1;
+}
+#endif
 
 #if defined(__NR_socket) && defined(__NR_connect) && defined(__NR_setsockopt)
 int my_socket(int domain, int type, int protocol) {

@@ -5,7 +5,7 @@ description: Documents the Sentry Android security detection app structure (Java
 
 # Sentry 项目结构
 
-Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Zygisk Injection**（Smaps Private_Dirty + VMap 特征扫描）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。**LSPosed Hook** 已合并至调试检测的 Xposed / Hook Framework。
+Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Zygisk Injection**（Smaps Private_Dirty + VMap 特征扫描 + Pagemap bit 61 软脏页检测）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。**LSPosed Hook** 已合并至调试检测的 Xposed / Hook Framework。
 
 ## 目录树
 

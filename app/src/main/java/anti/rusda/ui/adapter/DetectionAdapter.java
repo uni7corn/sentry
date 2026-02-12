@@ -144,10 +144,18 @@ public class DetectionAdapter extends RecyclerView.Adapter<DetectionAdapter.View
                 detailsContainer.setVisibility(item.isExpanded() ? View.VISIBLE : View.GONE);
             });
 
-            // Copy details to clipboard and show toast
+            // Copy details to clipboard (title + description + status + details) and show toast
             btnCopy.setOnClickListener(v -> {
-                CharSequence text = detailsContent.getText();
-                if (text != null && text.length() > 0) {
+                StringBuilder sb = new StringBuilder();
+                sb.append(item.getTitle()).append("\n");
+                sb.append(item.getDescription()).append("\n");
+                sb.append(statusText).append("\n");
+                CharSequence details = detailsContent.getText();
+                if (details != null && details.length() > 0) {
+                    sb.append("\n").append(details);
+                }
+                String text = sb.toString();
+                if (text.length() > 0) {
                     Context ctx = v.getContext();
                     ClipboardManager clipboard = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
                     if (clipboard != null) {

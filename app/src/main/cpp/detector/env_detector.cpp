@@ -1,6 +1,7 @@
 #include "env_detector.h"
 #include "utils/syscall_utils.h"
 #include <dirent.h>
+#include <cstdint>
 #include <cstdlib>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <sys/socket.h>
+#include <dlfcn.h>
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
@@ -402,11 +404,14 @@ static const void *my_memmem(const void *haystack, size_t haylen, const void *ne
     return nullptr;
 }
 
-/* 关键系统库：Frida inline hook 常见目标，显式检测提高命中率 */
+/* 关键系统库：Frida inline hook 常见目标，显式检测提高命中率
+ * 参考 2025 年 meta：frida-server 全局 hook zygote 时必改 libc/libselinux/libandroid_runtime */
 static const char *CRITICAL_SO_PATTERNS[] = {
-    "libart",    /* libart.so：ART 运行时 */
-    "libc.so",   /* libc.so：C 库 */
-    "libc++.so", /* libc++ */
+    "libart",              /* libart.so：ART 运行时 */
+    "libc.so",             /* libc.so：fork/vfork/signal 等 */
+    "libc++.so",           /* libc++ */
+    "libselinux.so",       /* libselinux.so：SELinux 权限检查 */
+    "libandroid_runtime.so", /* libandroid_runtime.so：Android 运行时 */
     nullptr
 };
 
@@ -457,6 +462,12 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
                             } else if (str_contains_ci(current_mapping, "libc.so") || str_contains_ci(current_mapping, "libc++.so")) {
                                 snprintf(details[n], 256, "SMAPS: libc.so executable segment has Private_Dirty: %d kB (code patched)",
                                          dirty_kb);
+                            } else if (str_contains_ci(current_mapping, "libselinux")) {
+                                snprintf(details[n], 256, "SMAPS: libselinux.so executable segment has Private_Dirty: %d kB (code patched)",
+                                         dirty_kb);
+                            } else if (str_contains_ci(current_mapping, "libandroid_runtime")) {
+                                snprintf(details[n], 256, "SMAPS: libandroid_runtime.so executable segment has Private_Dirty: %d kB (code patched)",
+                                         dirty_kb);
                             } else {
                                 snprintf(details[n], 256, "SMAPS: executable .so with Private_Dirty %d kB: %s",
                                          dirty_kb, current_mapping);
@@ -472,6 +483,63 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
         }
     }
     my_close(fd);
+    return n;
+}
+
+/* Pagemap bit 61 (soft-dirty) 检测：内核管理，用户态无法伪造
+ * Frida inline hook 触发 COW 后，页面的 soft-dirty 置位，即使还原字节码也不会清除 */
+#define PAGEMAP_PAGE_SIZE 4096
+#define PAGEMAP_ENTRY_SIZE 8
+#define PAGEMAP_BIT_PRESENT 63
+#define PAGEMAP_BIT_SOFT_DIRTY 61
+
+/* 检查某虚拟地址所在页是否 soft-dirty（曾被 COW 修改） */
+static bool check_pagemap_soft_dirty(void *vaddr, char *detail_out, size_t detail_len) {
+    uint64_t addr = (uint64_t)(uintptr_t)vaddr;
+    uint64_t page_idx = addr / PAGEMAP_PAGE_SIZE;
+    uint64_t offset = page_idx * PAGEMAP_ENTRY_SIZE;
+
+    int fd = my_open("/proc/self/pagemap", 0, 0);  /* O_RDONLY */
+    if (fd < 0) return false;
+
+    if (my_lseek(fd, (off_t)offset, 0) != (ssize_t)offset) {  /* SEEK_SET=0 */
+        my_close(fd);
+        return false;
+    }
+
+    uint64_t entry = 0;
+    ssize_t rd = my_read(fd, &entry, sizeof(entry));
+    my_close(fd);
+    if (rd != (ssize_t)sizeof(entry)) return false;
+
+    bool present = (entry >> PAGEMAP_BIT_PRESENT) & 1;
+    bool soft_dirty = (entry >> PAGEMAP_BIT_SOFT_DIRTY) & 1;
+
+    if (present && soft_dirty && detail_out && detail_len > 0) {
+        snprintf(detail_out, detail_len, "PAGEMAP: libc %s page has soft-dirty bit set (COW/Frida hook)",
+                 vaddr ? "func" : "");
+    }
+    return (present && soft_dirty);
+}
+
+/* 检测 libc 关键函数（fork/vfork/signal）所在页是否 soft-dirty，精准打击 Frida */
+static int detect_pagemap_libc_hooks(char (*details)[256], int max_details) {
+    int n = 0;
+    void *libc = dlopen("libc.so", RTLD_NOW);
+    if (!libc) return 0;
+
+    const char *names[] = { "fork", "vfork", "signal" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]) && n < max_details; i++) {
+        void *addr = dlsym(libc, names[i]);
+        if (!addr) continue;
+
+        if (check_pagemap_soft_dirty(addr, nullptr, 0)) {
+            snprintf(details[n], 256, "PAGEMAP: libc %s() page has soft-dirty bit (Frida COW fingerprint)",
+                     names[i]);
+            n++;
+        }
+    }
+    dlclose(libc);
     return n;
 }
 
@@ -523,6 +591,11 @@ int env_detect_zygisk_injection(char (*details)[256], int max_details) {
     if (n < max_details) {
         int vmap_n = scan_maps_for_zygisk_signatures(details + n, max_details - n);
         n += vmap_n;
+    }
+    /* Pagemap bit 61 (soft-dirty)：针对 libc fork/vfork/signal 精准检测 Frida COW 指纹 */
+    if (n < max_details) {
+        int pagemap_n = detect_pagemap_libc_hooks(details + n, max_details - n);
+        n += pagemap_n;
     }
     return n;
 }

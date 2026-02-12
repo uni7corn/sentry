@@ -35,4 +35,5 @@
 -keep class androidx.coordinatorlayout.widget.** { *; }
 
 # AppCompat
--keep class androidx.appcompat.widget.** { *; }
+-keep class androidx.appcompat.widget.** { *; }-dontwarn javax.naming.**
+-dontwarn org.bouncycastle.jce.provider.X509LDAPCertStoreSpi
