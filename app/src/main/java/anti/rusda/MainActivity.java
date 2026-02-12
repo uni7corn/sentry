@@ -180,10 +180,26 @@ public class MainActivity extends BaseActivity {
                 scanning = false;
                 setScanningUi(false);
                 overviewFragment.setScore(totalScore, maxScore);
+                overviewFragment.setWarningAndAnomalyTags(collectWarningAndAnomalyTags());
                 debugFragment.setResults(lastDebugResults);
                 environmentFragment.setResults(lastEnvResults);
             });
         }).start();
+    }
+
+    private List<DetectionResult> collectWarningAndAnomalyTags() {
+        List<DetectionResult> list = new ArrayList<>();
+        for (DetectionResult r : lastDebugResults) {
+            if (r.getStatus() != DetectionResult.STATUS_NORMAL) {
+                list.add(r);
+            }
+        }
+        for (DetectionResult r : lastEnvResults) {
+            if (r.getStatus() != DetectionResult.STATUS_NORMAL) {
+                list.add(r);
+            }
+        }
+        return list;
     }
 
     private void setScanningUi(boolean scanning) {

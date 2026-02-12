@@ -3,18 +3,18 @@
 本文档详细描述 Sentry 安全检测应用中的各项检测、评分机制、实现方式以及设计目的。
 
 > **维护要求**：本规范应与代码实现保持同步。根据 `.cursor/rules/modify-after-structure.mdc`，重大变更（如新增/删除检测项、修改实现层或逻辑等）完成后，须同步更新本文档及 `.cursor/skills/sentry-project-structure/SKILL.md`。  
-> **一致性**：本文档已与当前代码库对齐（检测项 7+9=16、权重、JNI/Native 接口、文件路径）。
+> **一致性**：本文档已与当前代码库对齐（检测项 7+10=17、权重、JNI/Native 接口、文件路径）。
 
 ---
 
 ## 一、检测总览
 
-Sentry 提供 **16 项** 安全检测，分为两类：
+Sentry 提供 **17 项** 安全检测，分为两类：
 
 | 类别       | 数量 | 管理类                     | 展示位置   |
 |------------|------|----------------------------|------------|
 | 调试检测   | 7    | `DebugDetectionManager`    | 调试检测 Tab |
-| 环境检测   | 9    | `EnvDetectionManager`     | 环境检测 Tab |
+| 环境检测   | 10   | `EnvDetectionManager`     | 环境检测 Tab |
 
 ### 1.1 检测项与权重一览表
 
@@ -30,12 +30,13 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | 8 | Bootloader | 环境 | **15** | — | 启动验证/锁定状态 + TEE RootOfTrust |
 | 9 | Magisk / Root | 环境 | **12** | — | Magisk/root 环境 |
 | 10 | LSPosed / Hook | 环境 | 10 | — | LSPosed/隐藏应用列表工具 |
-| 11 | Suspicious Files | 环境 | 10 | — | Frida/Magisk 等可疑路径 |
-| 12 | Emulator | 环境 | 10 | — | 模拟器特征 |
-| 13 | Kernel Patch | 环境 | 10 | **是** | 安全补丁陈旧度；过期仅警告不扣分 |
-| 14 | ADB Debug | 环境 | **5** | **是** | 仅警告不扣分 |
-| 15 | Multi-instance | 环境 | **5** | — | 多开/分身环境 |
-| 16 | Container / Virtualization | 环境 | **8** | — | 容器/虚拟化 |
+| 11 | Dangerous Apps | 环境 | **5** | **是** | 多渠道检测 Xposed 模块（meta-data、APK assets/xposed_init、modules.list）；仅警告不扣分 |
+| 12 | Suspicious Files | 环境 | 10 | — | Frida/Magisk 等可疑路径 |
+| 13 | Emulator | 环境 | 10 | — | 模拟器特征 |
+| 14 | Kernel Patch | 环境 | 10 | **是** | 安全补丁陈旧度；过期仅警告不扣分 |
+| 15 | ADB Debug | 环境 | **5** | **是** | 仅警告不扣分 |
+| 16 | Multi-instance | 环境 | **5** | — | 多开/分身环境 |
+| 17 | Container / Virtualization | 环境 | **8** | — | 容器/虚拟化 |
 
 ---
 
@@ -108,7 +109,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 
 ---
 
-## 三、环境检测（9 项）
+## 三、环境检测（10 项）
 
 ### 3.1 Bootloader
 
@@ -116,7 +117,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Bootloader 锁定状态与启动验证配置，**包含** TEE Key Attestation 的 RootOfTrust（verifiedBootKey、deviceLocked、verifiedBootState、verifiedBootHash） |
 | **实现层** | Native（`env_detector.cpp`）+ Java（`KeyAttestationHelper`） |
-| **实现** | 1) **Native**：读取 `ro.boot.verifiedbootstate`、`ro.boot.flash.locked`、`ro.boot.veritymode`、`ro.boot.vbmeta.device_state`、`sys.oem_unlock_allowed` 等；`orange`、`vbmeta.device_state=unlocked`、`flash.locked=0`、`veritymode=disabled` 判为 DANGER；`yellow`（自定义密钥）、`oem_unlock_allowed=1` 判为 WARNING；与 `/proc/cmdline` 交叉验证以检测 prop hook。2) **OEM 解锁交叉验证**（Java）：读取 `Settings.Global.oem_unlock_enabled`，与 Native 的 `sys.oem_unlock_allowed` 结果对比；二者不一致时判为 WARNING（可能 hook 或 OEM 语义差异）。3) **Key Attestation**：证书链完整性校验、RootOfTrust 解析；`verifiedBootKey` 全零（非模拟器）、`deviceLocked=false`、`verifiedBootState=Unverified(2)` 或 `Failed(3)` 判为 DANGER；SelfSigned(1)、启动 &lt;1 分钟判为 WARNING；API&lt;28 不可检测时返回 NORMAL。 |
+| **实现** | 1) **Native**：读取 `ro.boot.verifiedbootstate`、`ro.boot.flash.locked`、`ro.boot.veritymode`、`ro.boot.vbmeta.device_state`、`sys.oem_unlock_allowed` 等；`orange`、`vbmeta.device_state=unlocked`、`flash.locked=0`、`veritymode=disabled` 判为 DANGER；`yellow`（自定义密钥）、`oem_unlock_allowed=1` 判为 WARNING；与 `/proc/cmdline` 交叉验证以检测 prop hook。2) **OEM 解锁交叉验证**（Java）：尝试 `Settings.Global.oem_unlocking_enabled` / `oem_unlock_enabled`，与 Native 的 `sys.oem_unlock_allowed` 对比；二者不一致时判为 WARNING。**注意**：`sys.oem_unlock_allowed` 与 Settings 在多数设备上对普通应用**不可读**（系统限制），常显示 0/空；真正可靠的 Bootloader 解锁检测依赖 Key Attestation 的 `deviceLocked` 与 `ro.boot.*` 属性。3) **Key Attestation**：证书链完整性校验、RootOfTrust 解析；`verifiedBootKey` 全零（非模拟器）、`deviceLocked=false`、`verifiedBootState=Unverified(2)` 或 `Failed(3)` 判为 DANGER；SelfSigned(1)、启动 &lt;1 分钟判为 WARNING；API&lt;28 不可检测时返回 NORMAL。 |
 | **状态** | Native 或 Key Attestation 任一项 DANGER → `DANGER`；`warranty_bit=1` 或 AVB 版本缺失 → `WARNING`；verifiedBootKey 全零 / deviceLocked=false / Unverified 或 Failed → `DANGER`；SelfSigned → `WARNING`；Verified → `NORMAL`；API&lt;28 或 attestation 不可用 → `WARNING`；RootOfTrust 解析失败 → `NORMAL`（避免误报） |
 | **误报控制** | RootOfTrust 结构不被当前解析器识别时视为 NORMAL |
 | **权重** | `maxScore = 15` |
@@ -140,7 +141,17 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | **实现** | 1) Native：检测 `/data/adb/lspd`、`/data/adb/modules/zygisk_lsposed`；2) Java：检查是否安装 `dev.rikka.hide.myapplist`（Hide My Applist） |
 | **状态** | 任意一项存在 → `DANGER` |
 
-### 3.4 Suspicious Files
+### 3.4 Dangerous Apps
+
+| 属性     | 说明 |
+|----------|------|
+| **目的** | 检测应用列表中是否存在危险应用（如 Xposed 模块），降低 API 被 hook 后的漏检风险 |
+| **实现层** | Java + Native（`env_detector.cpp`，`env_verify_xposed_modules`） |
+| **实现** | **多渠道**：1) **Java meta-data**：`getInstalledPackages(GET_META_DATA)` + `queryIntentActivities(LAUNCHER)` 双路径获取应用列表，检查 `xposedmodule` / `xposed_module`；2) **风控应用**：检测 MT Manager（`bin.mt.plus`、`com.mi.mi.mtmanager`）、Termux（`com.termux`）；3) **Native APK 校验**：syscall 解析 APK（ZIP）中是否存在 `assets/xposed_init`，绕过 metaData hook；4) **Native modules.list**：尝试读取 `/data/data/de.robv.android.xposed.installer/conf/modules.list`、`/data/adb/lspd/config/modules.list`（Root 时可读）获取已启用模块。Android 11+ 需 `QUERY_ALL_PACKAGES` 权限。 |
+| **状态** | 任一渠道发现 Xposed 模块 → `WARNING`；未发现 → `NORMAL` |
+| **设计说明** | **warnOnly=true**：仅警告不扣分。检测到危险应用未必代表正在 hook 本应用，仅提示用户设备上存在可 hook 的模块。Native 层使用 syscall 绕过 libc，降低被 hook 风险 |
+
+### 3.5 Suspicious Files
 
 | 属性     | 说明 |
 |----------|------|
@@ -149,7 +160,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | **实现** | 1) 扫描 `/data/local/tmp` 中文件名包含 `frida-server` 的项；2) 检测路径 `/data/local/tmp/re.frida.server`；3) 检测目录/文件：`/data/adb/magisk`、`/data/adb/modules`、`/data/adb/lspd` 等（具体列表见 `env_detector.cpp` 中 `SUSPICIOUS_ADB_PATHS`） |
 | **状态** | 发现任意可疑路径 → `DANGER` |
 
-### 3.5 Emulator
+### 3.6 Emulator
 
 | 属性     | 说明 |
 |----------|------|
@@ -158,7 +169,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | **实现** | 1) **Build 属性**：上述字段含 `generic`、`unknown`、`google_sdk`、`sdk`、`vbox86p`、`emulator`、`ranchu`、`goldfish` 等（见 `EMULATOR_INDICATORS`）；2) **设备文件**：如 `/dev/socket/qemud`、`/dev/qemu_pipe`、`/system/lib/libc_malloc_debug_qemu.so` 等（见 `EMULATOR_FILES`）；3) **BlueStacks**：`/data/misc/emu/update_check.cfg` |
 | **状态** | 发现指标 → `WARNING`（避免对部分真机误报） |
 
-### 3.6 Kernel Patch
+### 3.7 Kernel Patch
 
 | 属性     | 说明 |
 |----------|------|
@@ -167,7 +178,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | **实现** | 解析 `Build.VERSION.SECURITY_PATCH` 日期，计算距今月数；≥24 月或 ≥12 月均 → `WARNING`（仅提示风险，不代表灰产/恶意设备） |
 | **状态** | 补丁过旧仅作警告，不判为危险；**warnOnly=true**，过期不扣分 |
 
-### 3.7 ADB Debug
+### 3.8 ADB Debug
 
 | 属性     | 说明 |
 |----------|------|
@@ -176,7 +187,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | **实现** | 1) Java：`Settings.Secure.development_settings_enabled`（开发者选项）、`Settings.Global.adb_enabled`、`adb_wifi_enabled`；2) Native：syscall 检查 `127.0.0.1:5555` 是否可连接 |
 | **状态** | 任意一项开启 → `WARNING`（仅提示不扣分：`warnOnly=true`，部分设备需开启 ADB 做开发） |
 
-### 3.8 Multi-instance（多开）
+### 3.9 Multi-instance（多开）
 
 | 属性     | 说明 |
 |----------|------|
@@ -185,7 +196,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 | **实现** | 包名包含 `:` 或 `dual`；`getFilesDir()` 路径含 `parallel`、`dual`、`clone`、`multi` |
 | **状态** | 符合 → `WARNING` |
 
-### 3.9 Container / Virtualization
+### 3.10 Container / Virtualization
 
 | 属性     | 说明 |
 |----------|------|
@@ -236,7 +247,7 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 安全百分比 = (总分 / 满分) × 100%
 ```
 
-- 调试检测 7 项 + 环境检测 9 项，共 16 项
+- 调试检测 7 项 + 环境检测 10 项，共 17 项
 - 总分在概览页以百分比形式展示
 
 ### 4.4 Native 返回格式
@@ -280,7 +291,7 @@ Native 检测统一返回 `String[]`：
 ### 5.5 warnOnly（只警告不扣分）
 
 - `DetectionResult` 支持 `warnOnly` 参数。当 `warnOnly=true` 且状态为 `WARNING` 时，`getEarnedScore()` 仍返回满分（与 NORMAL 一致），仅 UI 显示警告。
-- 用途：如 **ADB Debug**，部分设备需开启 ADB 做开发，判为危险会误伤，故仅提示、不参与扣分；**Kernel Patch** 安全补丁过期（如约 2 个月）仅提示风险，不代表灰产/恶意设备，故也设为 warnOnly，不扣分。
+- 用途：如 **ADB Debug**，部分设备需开启 ADB 做开发，判为危险会误伤，故仅提示、不参与扣分；**Kernel Patch** 安全补丁过期（如约 2 个月）仅提示风险，不代表灰产/恶意设备，故也设为 warnOnly，不扣分；**Dangerous Apps** 应用列表中检测到危险应用（如 Xposed 模块）时仅提示，不扣分（安装模块未必代表正在 hook 本应用）。
 
 ---
 
@@ -293,7 +304,7 @@ DetectionManager 初始化
     ↓
 并行执行 {
     DebugDetectionManager.runAllDetections()   ← 7 项
-    EnvDetectionManager.runAllDetections()     ← 9 项
+    EnvDetectionManager.runAllDetections()     ← 10 项
 }
     ↓
 收集 DetectionResult 列表
@@ -304,6 +315,14 @@ UI 展示（OverviewFragment）
     - 总分百分比
     - 分类详情（调试检测 Tab / 环境检测 Tab）
 ```
+
+---
+
+## 七、检测项与 UI 展示
+
+- **状态与颜色**：`STATUS_NORMAL`(0) 绿、`STATUS_WARNING`(1) 橙、`STATUS_DANGER`(2) 红
+- **概览页**：显示总分百分比 `Σ(earnedScore) / Σ(maxScore) × 100%`，以及设备信息、设备指纹
+- **调试/环境 Tab**：每项显示标题、摘要、详情（可展开），列表由 `DetectionAdapter` 渲染
 
 ---
 
@@ -330,6 +349,7 @@ UI 展示（OverviewFragment）
 | detectBootloader | `nativeDetectBootloader` + `KeyAttestationHelper.runAttestationSync()` | `env_detect_bootloader` 与 Java Key Attestation |
 | detectRoot | `nativeDetectMagisk` | `env_detect_magisk` |
 | detectLsposed | `nativeDetectLsposed` | `env_detect_lsposed` |
+| detectXposedModules（Dangerous Apps） | `nativeVerifyXposedModules` | Java 双路径获取应用列表 + Native 校验 APK（assets/xposed_init）、modules.list |
 | detectSuspiciousFiles | `nativeDetectSuspiciousFiles` | `env_detect_suspicious_files` |
 | detectEmulator | `nativeDetectEmulator` | `env_detect_emulator_files` |
 | detectAdbEnhanced | `nativeCheckPort(5555)` | `env_check_port_open`；Java 检查 `development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled` |
@@ -362,7 +382,7 @@ UI 展示（OverviewFragment）
 |------------------|------------|
 | 防 Frida 注入    | Frida Threads、Frida Ports、Memory Signatures、Named Pipes、Suspicious Files |
 | 防调试器附加     | Ptrace、Debugger Attached |
-| 防 Root/Hook     | Magisk/Root、LSPosed/Hook、Xposed、Bootloader（含 Key Attestation） |
+| 防 Root/Hook     | Magisk/Root、LSPosed/Hook、Xposed、Dangerous Apps、Bootloader（含 Key Attestation） |
 | 设备完整性       | Bootloader（含 Key Attestation）、Kernel Patch |
 | 防模拟器/容器    | Emulator、Container/Virtualization |
 | 开发/运维风险    | ADB Debug、Multi-instance |
@@ -641,7 +661,7 @@ JNIEXPORT jobjectArray JNICALL Java_..._nativeDetectMagisk(...) {
 
 **文件**：`app/src/main/java/anti/rusda/detector/EnvDetectionManager.java`
 
-- `runAllDetections()` 依次调用 9 项环境检测；Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
+- `runAllDetections()` 依次调用 10 项环境检测；Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
 - **ADB Debug** 检测：① `Settings.Secure.development_settings_enabled`（开发者选项）；② `Settings.Global.adb_enabled`、`adb_wifi_enabled`；③ Native `nativeCheckPort(5555)`。任一项开启 → WARNING。
 - 使用 `warnOnly=true`，WARNING 时仍得满分，仅 UI 提示。
 

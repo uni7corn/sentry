@@ -9,6 +9,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
@@ -19,10 +20,14 @@ import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import anti.rusda.R;
+import anti.rusda.detector.DetectionResult;
+import com.google.android.material.chip.Chip;
+import com.google.android.material.chip.ChipGroup;
 
 public class OverviewFragment extends Fragment {
 
@@ -32,6 +37,8 @@ public class OverviewFragment extends Fragment {
     private LinearLayout scanProgressContainer;
     private LinearProgressIndicator scanProgress;
     private LinearLayout deviceInfoContainer;
+    private TextView warningTagsLabel;
+    private ChipGroup warningTagsContainer;
 
     private int totalScore = -1;
     private int maxScore = -1;
@@ -53,6 +60,8 @@ public class OverviewFragment extends Fragment {
         scanProgressContainer = view.findViewById(R.id.scan_progress_container);
         scanProgress = view.findViewById(R.id.scan_progress);
         deviceInfoContainer = view.findViewById(R.id.device_info_container);
+        warningTagsLabel = view.findViewById(R.id.warning_tags_label);
+        warningTagsContainer = view.findViewById(R.id.warning_tags_container);
         fillDeviceInfo();
         refreshScoreDisplay();
         bindScanButton();
@@ -75,6 +84,29 @@ public class OverviewFragment extends Fragment {
         this.totalScore = total;
         this.maxScore = max;
         refreshScoreDisplay();
+    }
+
+    /** 设置警告与异常项标签（概览页展示：橙色=警告，红色=异常） */
+    public void setWarningAndAnomalyTags(List<DetectionResult> items) {
+        if (warningTagsLabel == null || warningTagsContainer == null) return;
+        boolean hasContent = items != null && !items.isEmpty();
+        warningTagsLabel.setVisibility(hasContent ? View.VISIBLE : View.GONE);
+        warningTagsContainer.setVisibility(hasContent ? View.VISIBLE : View.GONE);
+        if (!hasContent) return;
+
+        warningTagsContainer.removeAllViews();
+        for (DetectionResult r : items) {
+            Chip chip = new Chip(requireContext());
+            chip.setText(r.getTitle());
+            boolean isDanger = r.getStatus() == DetectionResult.STATUS_DANGER;
+            chip.setChipBackgroundColor(ContextCompat.getColorStateList(requireContext(),
+                    isDanger ? R.color.status_danger_container : R.color.status_warning_container));
+            chip.setTextColor(ContextCompat.getColor(requireContext(),
+                    isDanger ? R.color.status_danger : R.color.status_warning));
+            chip.setChipMinHeight((int) (32 * getResources().getDisplayMetrics().density));
+            chip.setChipStrokeWidth(0);
+            warningTagsContainer.addView(chip);
+        }
     }
 
     public void setScanning(boolean scanning) {

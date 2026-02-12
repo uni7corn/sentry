@@ -33,6 +33,11 @@ bool env_check_port_open(int port);
 // Container/cgroup check - returns count, DANGER when > 0
 int env_detect_cgroup(char (*details)[256], int max_details);
 
+// Dangerous Apps: verify APK has assets/xposed_init, read modules.list (syscall)
+// apk_paths, pkg_names: parallel arrays, count elements; fills out_pkgs with package names, returns count
+int env_verify_xposed_modules(const char **apk_paths, const char **pkg_names, int count,
+                              char (*out_pkgs)[256], int max_out);
+
 #ifdef __cplusplus
 }
 #endif

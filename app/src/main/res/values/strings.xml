@@ -11,6 +11,7 @@
     <string name="tab_environment">Environment</string>
     <string name="security_score">Security score</string>
     <string name="device_info">Device info</string>
+    <string name="warning_tags">Warnings &amp; Anomalies</string>
 
     <!-- System / Device info labels (Overview) -->
     <string name="label_model">Model</string>

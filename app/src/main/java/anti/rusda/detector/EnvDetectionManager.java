@@ -1,8 +1,13 @@
 package anti.rusda.detector;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Process;
 import android.provider.Settings;
 
@@ -17,7 +22,9 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 手机环境检测：Root、Magisk、Bootloader、模拟器、多开、可疑文件等。
@@ -32,6 +39,13 @@ public class EnvDetectionManager {
 
     private static final String[] HIDE_TOOL_PACKAGES = {
             "dev.rikka.hide.myapplist"   // Hide My Applist
+    };
+
+    /** 风控应用：Xposed 模块 + MT Manager、Termux 等（可修改 APK、运行脚本） */
+    private static final String[] DANGEROUS_APP_PACKAGES = {
+            "bin.mt.plus",           // MT Manager
+            "com.mi.mi.mtmanager",   // MT Manager (legacy)
+            "com.termux"             // Termux
     };
 
     static {
@@ -49,6 +63,8 @@ public class EnvDetectionManager {
     private static native String[] nativeDetectEmulator(String hardware, String product, String device, String brand);
     private static native boolean nativeCheckPort(int port);
     private static native String[] nativeCheckCgroup();
+    /** Verify APKs via syscall (assets/xposed_init) + modules.list; returns package names of Xposed modules */
+    private static native String[] nativeVerifyXposedModules(String[] apkPaths, String[] packageNames);
 
     private final Context context;
 
@@ -61,6 +77,7 @@ public class EnvDetectionManager {
         results.add(detectBootloader());
         results.add(detectRoot());
         results.add(detectLsposed());
+        results.add(detectXposedModules());
         results.add(detectSuspiciousFiles());
         results.add(detectEmulator());
         results.add(detectKernelPatch());
@@ -100,19 +117,32 @@ public class EnvDetectionManager {
             details.add("Native bootloader check unavailable");
         }
 
-        /* 1.5 OEM 解锁交叉验证：Native sys.oem_unlock_allowed vs Java Settings.Global.oem_unlock_enabled */
+        /* 1.5 OEM 解锁交叉验证：Native sys.oem_unlock_allowed vs Java Settings.Global
+         * 注意：sys.oem_unlock_allowed 与 oem_unlock_enabled 在多数设备上对普通应用不可读（系统限制），
+         * 两者可能常为 0/空，非检测逻辑错误。 */
         if (context != null) {
             details.add("═══ OEM Unlock Cross-Verify ═══");
-            int oemUnlockJava = 0;
+            int oemUnlockJava = -1;
             try {
-                oemUnlockJava = Settings.Global.getInt(context.getContentResolver(), "oem_unlock_enabled", 0);
-            } catch (SecurityException ignored) { }
+                android.content.ContentResolver cr = context.getContentResolver();
+                oemUnlockJava = Settings.Global.getInt(cr, "oem_unlocking_enabled", -1);
+                if (oemUnlockJava < 0) {
+                    oemUnlockJava = Settings.Global.getInt(cr, "oem_unlock_enabled", -1);
+                }
+            } catch (SecurityException ignored) {
+                oemUnlockJava = -1;
+            }
+            boolean javaReadable = (oemUnlockJava >= 0);
             boolean javaOemEnabled = (oemUnlockJava == 1);
-            details.add("Settings.Global.oem_unlock_enabled: " + (javaOemEnabled ? "1 (enabled)" : "0 (disabled)"));
-            details.add("Native sys.oem_unlock_allowed: " + (nativeOemEnabled ? "1 (enabled)" : "0 (disabled)"));
-            if (nativeOemEnabled != javaOemEnabled) {
+            String javaStr = !javaReadable ? "unreadable (system restricted)" : (javaOemEnabled ? "1 (enabled)" : "0 (disabled)");
+            details.add("Settings.Global.oem_unlock*: " + javaStr);
+            details.add("Native sys.oem_unlock_allowed: " + (nativeOemEnabled ? "1 (enabled)" : "0 or unreadable"));
+            if (javaReadable && nativeOemEnabled != javaOemEnabled) {
                 details.add("OEM unlock cross-verify mismatch (possible hook or OEM-specific semantics)");
                 if (statusNat < DetectionResult.STATUS_WARNING) statusNat = DetectionResult.STATUS_WARNING;
+            }
+            if (!javaReadable && !nativeOemEnabled) {
+                details.add("Note: OEM unlock status often restricted on stock devices; Key Attestation deviceLocked is more reliable.");
             }
         }
 
@@ -250,6 +280,125 @@ public class EnvDetectionManager {
         DetectionResult result = new DetectionResult("LSPosed / Hook", summary, status);
         result.setDetails(details.isEmpty() ? Collections.singletonList("No LSPosed or hide tools found") : details);
         return result;
+    }
+
+    /**
+     * Dangerous Apps: 多种方式检测 Xposed 模块，降低 API 被 hook 的影响。
+     * 1) Java meta-data (xposedmodule) - 可被 hook；
+     * 2) Native 解析 APK 的 assets/xposed_init - syscall，难 hook；
+     * 3) Native 读取 modules.list - Root 时有效。
+     * 仅警告不扣分（warnOnly）。
+     */
+    private DetectionResult detectXposedModules() {
+        List<String> details = new ArrayList<>();
+        Set<String> dangerousPkgs = new LinkedHashSet<>();
+        int status = DetectionResult.STATUS_NORMAL;
+
+        if (context == null) {
+            details.add("No context");
+            return new DetectionResult("Dangerous Apps", "Context unavailable", status, 5, details, true);
+        }
+
+        PackageManager pm = context.getPackageManager();
+        if (pm == null) {
+            details.add("PackageManager unavailable");
+            return new DetectionResult("Dangerous Apps", "PackageManager unavailable", status, 5, details, true);
+        }
+
+        List<String> apkPaths = new ArrayList<>();
+        List<String> pkgNames = new ArrayList<>();
+
+        try {
+            /* 方式1: getInstalledPackages - 可能被 Hide My Applist 等隐藏 */
+            List<PackageInfo> packages = pm.getInstalledPackages(PackageManager.GET_META_DATA);
+            for (PackageInfo pkg : packages) {
+                if (pkg == null || pkg.applicationInfo == null) continue;
+                ApplicationInfo appInfo = pkg.applicationInfo;
+                if (isXposedModule(appInfo.metaData) || isDangerousAppPackage(pkg.packageName)) {
+                    dangerousPkgs.add(pkg.packageName);
+                }
+                String src = appInfo.sourceDir;
+                if (src != null && !src.isEmpty()) {
+                    apkPaths.add(src);
+                    pkgNames.add(pkg.packageName);
+                }
+            }
+
+            /* 方式2: queryIntentActivities - 与方式1交叉验证，发现被隐藏的应用 */
+            Intent launcher = new Intent(Intent.ACTION_MAIN, null);
+            launcher.addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ResolveInfo> apps = pm.queryIntentActivities(launcher, 0);
+            if (apps != null) {
+                for (ResolveInfo ri : apps) {
+                    if (ri == null || ri.activityInfo == null) continue;
+                    String pkg = ri.activityInfo.packageName;
+                    ApplicationInfo appInfo = ri.activityInfo.applicationInfo;
+                    if (appInfo != null && appInfo.sourceDir != null && !appInfo.sourceDir.isEmpty()) {
+                        if (!apkPaths.contains(appInfo.sourceDir)) {
+                            apkPaths.add(appInfo.sourceDir);
+                            pkgNames.add(pkg);
+                        }
+                        if (isXposedModule(appInfo.metaData) || isDangerousAppPackage(pkg)) {
+                            dangerousPkgs.add(pkg);
+                        }
+                    }
+                }
+            }
+
+            /* 方式3: Native 校验 - syscall 解析 APK 的 assets/xposed_init + modules.list，绕过 metaData hook */
+            if (!apkPaths.isEmpty() && apkPaths.size() == pkgNames.size()) {
+                try {
+                    String[] nativeFound = nativeVerifyXposedModules(
+                            apkPaths.toArray(new String[0]),
+                            pkgNames.toArray(new String[0]));
+                    if (nativeFound != null) {
+                        for (String p : nativeFound) {
+                            if (p != null && !p.isEmpty()) dangerousPkgs.add(p);
+                        }
+                    }
+                } catch (Throwable ignored) { /* Native 调用失败时仍使用 Java 结果 */ }
+            }
+        } catch (Exception e) {
+            details.add("Scan error: " + e.getMessage());
+            status = DetectionResult.STATUS_WARNING;
+        }
+
+        for (String p : dangerousPkgs) {
+            details.add("Dangerous app: " + p);
+        }
+        if (!dangerousPkgs.isEmpty()) status = DetectionResult.STATUS_WARNING;
+
+        if (details.isEmpty()) {
+            details.add("No dangerous apps found");
+        }
+
+        String summary = status == DetectionResult.STATUS_NORMAL
+                ? "No dangerous apps found"
+                : "Dangerous app(s) detected";
+        return new DetectionResult("Dangerous Apps", summary, status, 5, details, true);  // warnOnly
+    }
+
+    /** 检查 meta-data 是否声明为 Xposed 模块（xposedmodule / xposed_module） */
+    private static boolean isXposedModule(Bundle metaData) {
+        if (metaData == null) return false;
+        Object v1 = metaData.get("xposedmodule");
+        Object v2 = metaData.get("xposed_module");
+        return isTruthy(v1) || isTruthy(v2);
+    }
+
+    private static boolean isTruthy(Object v) {
+        if (v == null) return false;
+        if (Boolean.TRUE.equals(v)) return true;
+        return "true".equalsIgnoreCase(String.valueOf(v));
+    }
+
+    /** 检查是否风控应用（MT Manager、Termux 等） */
+    private static boolean isDangerousAppPackage(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return false;
+        for (String d : DANGEROUS_APP_PACKAGES) {
+            if (d.equals(pkg)) return true;
+        }
+        return false;
     }
 
     private List<String> checkHideToolPackages() {

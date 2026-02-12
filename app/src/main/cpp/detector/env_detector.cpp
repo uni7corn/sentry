@@ -21,6 +21,10 @@
 #define SO_SNDTIMEO  21
 #define CONNECT_TIMEOUT_SEC 2
 
+/* ZIP local file header: 0x04034b50, then at 0x1A filename_len (2 bytes), 0x1C extra_len (2 bytes) */
+#define ZIP_LOCAL_SIG 0x04034b50
+#define ZIP_HEADER_FIXED 30
+
 struct sockaddr_in_min {
     unsigned short sin_family;
     unsigned short sin_port;
@@ -468,6 +472,136 @@ bool env_check_port_open(int port) {
     int result = my_connect(sock, &addr, (unsigned int)sizeof(addr));
     my_close(sock);
     return (result == 0);
+}
+
+/* Check if APK (ZIP) contains assets/xposed_init using syscall - bypasses hooked metaData */
+static bool apk_has_xposed_init(const char *apk_path) {
+    int fd = my_open(apk_path, 0, 0);  /* O_RDONLY */
+    if (fd < 0) return false;
+
+    /* Read in chunks; overlap to handle headers split across boundaries */
+    char buf[4096];
+    char overlap[64];
+    size_t overlap_len = 0;
+    ssize_t total = 0;
+    const size_t max_scan = 4 * 1024 * 1024;  /* limit scan to 4MB (assets usually early) */
+    bool found = false;
+
+    while (total < max_scan) {
+        ssize_t rd = my_read(fd, buf + overlap_len, sizeof(buf) - overlap_len);
+        if (rd <= 0) break;
+        rd += (ssize_t)overlap_len;
+        overlap_len = 0;
+
+        for (size_t i = 0; i + ZIP_HEADER_FIXED + 18 <= (size_t)rd; i++) {
+            if (*(unsigned int *)(buf + i) != ZIP_LOCAL_SIG) continue;
+
+            unsigned short fn_len = (unsigned char)buf[i + 26] | ((unsigned char)buf[i + 27] << 8);
+            if (fn_len != 18 || i + ZIP_HEADER_FIXED + fn_len > (size_t)rd) continue;
+
+            if (my_strncmp(buf + i + ZIP_HEADER_FIXED, "assets/xposed_init", 18) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+        /* Keep last 50 bytes for overlap (max header + short filename) */
+        if ((size_t)rd > 50) {
+            my_memcpy(overlap, buf + rd - 50, 50);
+            overlap_len = 50;
+        }
+        total += rd;
+    }
+    my_close(fd);
+    return found;
+}
+
+/* Check if pkg (len chars) already in out_pkgs[0..n-1] */
+static bool pkg_in_list_by_name(char (*out_pkgs)[256], int n, const char *pkg, size_t len) {
+    for (int i = 0; i < n; i++) {
+        if (my_strlen(out_pkgs[i]) == len && my_strncmp(out_pkgs[i], pkg, len) == 0) return true;
+    }
+    return false;
+}
+
+/* Read Xposed modules.list (enabled modules), extract package names from APK paths. Needs root. */
+static int read_modules_list(char (*out_pkgs)[256], int max_out) {
+    static const char *PATHS[] = {
+        "/data/data/de.robv.android.xposed.installer/conf/modules.list",
+        "/data/adb/lspd/config/modules.list"
+    };
+    int n = 0;
+    for (unsigned idx = 0; idx < sizeof(PATHS)/sizeof(PATHS[0]) && n < max_out; idx++) {
+        int fd = my_open(PATHS[idx], 0, 0);  /* O_RDONLY */
+        if (fd < 0) continue;
+
+        char buf[2048];
+        ssize_t rd = my_read(fd, buf, sizeof(buf) - 1);
+        my_close(fd);
+        if (rd <= 0) continue;
+        buf[rd] = '\0';
+
+        const char *p = buf;
+        while (*p && n < max_out) {
+            const char *line_end = p;
+            while (*line_end && *line_end != '\n' && *line_end != '\r') line_end++;
+            if (line_end > p) {
+                /* Extract package from path: .../com.example.module-xxx/base.apk */
+                const char *last_slash = nullptr;
+                for (const char *q = p; q < line_end; q++) if (*q == '/') last_slash = q;
+                if (last_slash && last_slash + 1 < line_end) {
+                    const char *start = last_slash + 1;
+                    const char *dash = my_strstr(start, "-");
+                    size_t len = dash ? (size_t)(dash - start) : (size_t)(line_end - start);
+                    if (len > 0 && len < 200 && !pkg_in_list_by_name(out_pkgs, n, start, len)) {
+                        my_strncpy(out_pkgs[n], start, dash ? len : 199);
+                        out_pkgs[n][dash ? len : 199] = '\0';
+                        n++;
+                    }
+                }
+            }
+            p = line_end;
+            while (*p == '\n' || *p == '\r') p++;
+        }
+    }
+    return n;
+}
+
+/* Check if pkg (null-terminated) already in out_pkgs[0..n-1] */
+static bool pkg_in_list(const char *pkg, char (*out_pkgs)[256], int n) {
+    for (int i = 0; i < n; i++) {
+        if (my_strcmp(out_pkgs[i], pkg) == 0) return true;
+    }
+    return false;
+}
+
+int env_verify_xposed_modules(const char **apk_paths, const char **pkg_names, int count,
+                              char (*out_pkgs)[256], int max_out) {
+    int n = 0;
+
+    /* 1. Verify each APK has assets/xposed_init (syscall, bypasses metaData hook) */
+    for (int i = 0; i < count && n < max_out; i++) {
+        if (!apk_paths[i] || !pkg_names[i]) continue;
+        if (apk_has_xposed_init(apk_paths[i]) && !pkg_in_list(pkg_names[i], out_pkgs, n)) {
+            my_strncpy(out_pkgs[n], pkg_names[i], 255);
+            out_pkgs[n][255] = '\0';
+            n++;
+        }
+    }
+
+    /* 2. Read modules.list (if root) - enabled modules from Xposed/LSPosed installer */
+    int mod_count = read_modules_list(out_pkgs + n, max_out - n);
+    for (int i = n; i < n + mod_count; i++) {
+        if (pkg_in_list(out_pkgs[i], out_pkgs, n)) {
+            /* duplicate, shift down */
+            for (int j = i; j < n + mod_count - 1; j++)
+                my_strncpy(out_pkgs[j], out_pkgs[j + 1], 255);
+            mod_count--;
+            i--;
+        }
+    }
+    n += mod_count;
+    return n;
 }
 
 int env_detect_cgroup(char (*details)[256], int max_details) {

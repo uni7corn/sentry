@@ -110,6 +110,50 @@ Java_anti_rusda_detector_EnvDetectionManager_nativeCheckCgroup(JNIEnv *env, jcla
     return buildResult(env, status, n > 0 ? "Container/virtualization detected" : "No container detected", details, n > 0 ? n : 0);
 }
 
+// Dangerous Apps: verify APKs via syscall (assets/xposed_init) + modules.list; returns String[] of package names
+JNIEXPORT jobjectArray JNICALL
+Java_anti_rusda_detector_EnvDetectionManager_nativeVerifyXposedModules(JNIEnv *env, jclass clazz,
+        jobjectArray apkPaths, jobjectArray packageNames) {
+    if (!apkPaths || !packageNames) return nullptr;
+    jsize count = env->GetArrayLength(apkPaths);
+    if (count != env->GetArrayLength(packageNames) || count <= 0) return nullptr;
+
+    const char *paths[256];
+    const char *pkgs[256];
+    char *pathChars[256];
+    char *pkgChars[256];
+    jsize copyCount = count > 256 ? 256 : count;
+
+    jstring jPathArr[256], jPkgArr[256];
+    for (jsize i = 0; i < copyCount; i++) {
+        jstring jPath = (jstring)env->GetObjectArrayElement(apkPaths, i);
+        jstring jPkg = (jstring)env->GetObjectArrayElement(packageNames, i);
+        jPathArr[i] = jPath;
+        jPkgArr[i] = jPkg;
+        pathChars[i] = jPath ? const_cast<char *>(env->GetStringUTFChars(jPath, nullptr)) : nullptr;
+        pkgChars[i] = jPkg ? const_cast<char *>(env->GetStringUTFChars(jPkg, nullptr)) : nullptr;
+        paths[i] = pathChars[i];
+        pkgs[i] = pkgChars[i];
+    }
+
+    char outPkgs[32][256];
+    int n = env_verify_xposed_modules(paths, pkgs, copyCount, outPkgs, 32);
+
+    for (jsize i = 0; i < copyCount; i++) {
+        if (pathChars[i] && jPathArr[i]) env->ReleaseStringUTFChars(jPathArr[i], pathChars[i]);
+        if (pkgChars[i] && jPkgArr[i]) env->ReleaseStringUTFChars(jPkgArr[i], pkgChars[i]);
+    }
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    jobjectArray result = env->NewObjectArray(n, stringClass, nullptr);
+    if (!result) return nullptr;
+    for (int i = 0; i < n; i++) {
+        env->SetObjectArrayElement(result, i, env->NewStringUTF(outPkgs[i]));
+    }
+    return result;
+}
+
 // Emulator: Java passes Build.*; native checks files + indicators
 JNIEXPORT jobjectArray JNICALL
 Java_anti_rusda_detector_EnvDetectionManager_nativeDetectEmulator(JNIEnv *env, jclass clazz,

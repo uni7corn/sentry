@@ -5,7 +5,7 @@ description: Documents the Sentry Android security detection app structure (Java
 
 # Sentry 项目结构
 
-Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust，与 Hunter 等工具的 boot 修补检测一致）。
+Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。
 
 ## 目录树
 
@@ -51,6 +51,7 @@ sentry/
 │       │       └── adapter/DetectionAdapter.java
 │       └── res/
 │           ├── layout/   # activity_main(ViewPager2+Tab), fragment_overview/debug/environment, item_detection
+│           ├── menu/     # top_app_bar.xml
 │           ├── values/   # strings.xml, colors.xml, themes.xml
 │           ├── values-zh/
 │           ├── values-night/
@@ -88,7 +89,7 @@ sentry/
 
 - **命名空间/包名**: `anti.rusda`；**applicationId**: `anti.rusda`
 - **Native 库**: `libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）
-- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult`、`nativeDetectXposedPaths`、`nativeDetectHook` 等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectLsposed`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeCheckCgroup`、`nativeGetEnvVersion`；Bootloader 含 Native + Java `KeyAttestationHelper.runAttestationSync()`；指纹 → `nativeGetProcVersion`
+- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult`、`nativeDetectXposedPaths`、`nativeDetectHook` 等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectLsposed`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeCheckCgroup`、`nativeGetEnvVersion`；Bootloader 含 Native + Java `KeyAttestationHelper.runAttestationSync()`；**Dangerous Apps** 为 Java + Native 混合（`nativeVerifyXposedModules`：APK assets/xposed_init、modules.list）；指纹 → `nativeGetProcVersion`
 - **检测状态**: `STATUS_NORMAL=0`(绿), `STATUS_WARNING=1`(橙), `STATUS_DANGER=2`(红)；每项有 **分数**（getEarnedScore/getMaxScore），概览页显示总分百分比
 - **ABI**: 仅 `arm64-v8a`；C++17；Android 15+ 使用 16KB 页面对齐
 - **导航**: 底部 TabLayout + ViewPager2 左右滑动，三页：概览、调试检测、环境检测

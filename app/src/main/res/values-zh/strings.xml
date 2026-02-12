@@ -11,6 +11,7 @@
     <string name="tab_environment">环境检测</string>
     <string name="security_score">安全分数</string>
     <string name="device_info">设备信息</string>
+    <string name="warning_tags">警告与异常</string>
 
     <!-- System / Device info labels (Overview) -->
     <string name="label_model">型号</string>
