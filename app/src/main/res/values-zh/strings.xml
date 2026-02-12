@@ -124,7 +124,7 @@
     <string name="auto_scan">启动时自动检测</string>
     <string name="auto_scan_summary">应用启动时自动开始检测</string>
     <string name="advanced_checks">高级检测</string>
-    <string name="advanced_checks_summary">包含更彻底但更耗时的检测项</string>
+    <string name="advanced_checks_summary">VMAP 匿名可执行内存阈值降至 4KB（默认 128KB）；可能增加误报</string>
 
     <!-- Privacy Settings -->
     <string name="collect_diagnostics">收集诊断信息</string>

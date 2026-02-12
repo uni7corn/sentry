@@ -67,9 +67,9 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测进程内存映射中是否存在 Frida/LSPosed 相关库或字符串；**增强**：匿名可执行内存（LSPosed 隐藏 so 时仍保留可执行权限） |
 | **实现层** | Native（C++，`memory_scanner.cpp`） |
-| **实现** | 1) **签名匹配**：使用 syscall `my_open`/`my_read` 读取 `/proc/self/maps`，逐行匹配 `frida`、`FRIDA`、`gum-js`、`gobject`、`gmain`、`frida-agent`、`frida-gadget`、`frida-server`、`liblspd.so`、`libriru.so`、`libriruloader.so`、`libxposed`、`org.lsposed` 等；2) **匿名可执行内存**：解析 maps 行，识别匿名路径（排除 [vdso]/[vvar]/[stack]/[heap]）+ 可执行权限 + 大小 ≥128KB 的映射，最多报告 2 条，用于发现 LSPosed 等隐藏 so 后仍保留的可执行代码 |
+| **实现** | 1) **签名匹配**：使用 syscall `my_open`/`my_read` 读取 `/proc/self/maps`，逐行匹配 `frida`、`FRIDA`、`gum-js`、`gobject`、`gmain`、`frida-agent`、`frida-gadget`、`frida-server`、`liblspd.so`、`libriru.so`、`libriruloader.so`、`libxposed`、`org.lsposed`、**zygisk_lsposed**、**zygisk**（覆盖 maps 中 `/data/adb/modules/zygisk_lsposed/zygisk/arm64-v8a.so`）等；2) **匿名可执行内存**：解析 maps 行，识别匿名路径（排除 [vdso]/[vvar]/[stack]/[heap]）+ 可执行权限 + 大小 ≥128KB 的映射，最多报告 2 条，用于发现 LSPosed 等隐藏 so 后仍保留的可执行代码 |
 | **状态** | 发现任一签名或可疑匿名可执行内存 → `DANGER`；未发现 → `NORMAL` |
-| **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；匿名可执行内存检测阈值 128KB 降低 JIT 误报 |
+| **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；匿名可执行内存检测阈值 default 128KB 降低 JIT 误报；**设置 → 高级检测** 开启后阈值降至 4KB，可发现更小匿名可执行区（可能增加误报） |
 
 ### 2.4 Named Pipes
 
@@ -104,7 +104,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Xposed/LSPosed/EdXposed 框架及内联/PLT Hook、特征路径与注入 fd |
 | **实现层** | Java + Native（`hook_detector.cpp`、`xposed_detector.cpp`、`memory_scanner.cpp`）；入口方法名 `checkLibraryIntegrity(Context)` |
-| **实现** | 1) **Java**（检测**当前进程**是否被 hook，非「应用安装」）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `XposedHelpers`/`XposedBridge` 的 `findAndHookMethod`、`hookAllMethods` 等关键方法；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed`，尝试加载 `org.lsposed.lspd.core.Main`，检查 parent 链含 Xposed/Lsp（需绕过 Hidden API）。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：检测 Xposed 路径、**LSPosed 路径**（`/data/adb/lspd`、`/data/adb/modules/zygisk_lsposed`）、**Riru 路径**、**ro.dalvik.vm.native.bridge** 可疑值、**Zygisk fexecve**（`/proc/self/exe` 为 `/dev/fd/X`）、**LD_PRELOAD/MAGISKTMP** 环境变量、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：`/proc/self/maps` 中匹配 `libxposed`、`XposedBridge`、`XposedHelpers`、`org.lsposed` 等签名；⑦ 内联 Hook、PLT/GOT、libc 完整性（`hook_detector.cpp`）。 |
+| **实现** | 1) **Java**（检测**当前进程**是否被 hook，非「应用安装」）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `XposedHelpers`/`XposedBridge` 的 `findAndHookMethod`、`hookAllMethods` 等关键方法；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed`，尝试加载 `org.lsposed.lspd.core.Main`，检查 parent 链含 Xposed/Lsp（需绕过 Hidden API）。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：检测 Xposed 路径、**LSPosed 路径**（`/data/adb/lspd`、`/data/adb/modules/zygisk_lsposed`）、**Riru 路径**、**ro.dalvik.vm.native.bridge** 可疑值、**Zygisk fexecve**（`/proc/self/exe` 为 `/dev/fd/X`）、**LD_PRELOAD/MAGISKTMP** 环境变量、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：`/proc/self/maps` 中匹配 `libxposed`、`XposedBridge`、`XposedHelpers`、`org.lsposed`、`zygisk_lsposed`、`zygisk` 等签名；⑦ 内联 Hook、PLT/GOT、libc 完整性（`hook_detector.cpp`）。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
 
 ---
@@ -138,7 +138,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Magisk Zygisk、ZygiskNext、LSPosed 等通过内存注入的进程内特征 |
 | **实现层** | Native（`env_detector.cpp`，`env_detect_zygisk_injection`） |
-| **实现** | 1) **Smaps 检测**：读取 `/proc/self/smaps`，解析可执行段（`r-xp`/`r-x`），若 `.so` 映射段中 `Private_Dirty > 0` 则判为可疑注入（正常代码段不应有 Private_Dirty）；2) **VMap 检测**：扫描 `/proc/self/maps`，对匿名可执行映射（`r-x` + `anon`）读取内存，搜索 `zygisk_module_entry`、`libzygisk.so`、`ZygiskModule`、`zygisk` 等特征字符串。使用 syscall（`my_open`/`my_read`）绕过 libc。 |
+| **实现** | 1) **Smaps 检测**：读取 `/proc/self/smaps`，解析可执行段（`r-xp`/`r-x`），若 `.so` 或关键系统库（`libart.so`、`libc.so`、`libc++.so`）映射段中 `Private_Dirty > 0` 则判为可疑注入（正常代码段不应有 Private_Dirty）；显式针对 libart/libc 提高对 Frida inline hook 的命中率；2) **VMap 检测**：扫描 `/proc/self/maps`，对匿名可执行映射（`r-x` + `anon`）读取内存，搜索 `zygisk_module_entry`、`libzygisk.so`、`ZygiskModule`、`zygisk` 等特征字符串。使用 syscall（`my_open`/`my_read`）绕过 libc。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
 | **设计说明** | 参考 Android-App-Memory-Analysis、JingMatrixDemo；JIT 可产生 Private_Dirty，需结合白名单与阈值；多种方法联合降低误报 |
 

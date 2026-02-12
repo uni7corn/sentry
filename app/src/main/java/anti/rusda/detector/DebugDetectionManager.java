@@ -1,6 +1,7 @@
 package anti.rusda.detector;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Debug;
 
 import java.io.BufferedReader;
@@ -23,8 +24,8 @@ public class DebugDetectionManager {
     private static native String[] nativeDetectFridaThreads();
     /** 端口扫描在 Native 层（syscall），结果由此方法返回 */
     private static native String[] nativeGetFridaPortScanResult();
-    /** 内存签名扫描在 Native 层（syscall），防 Hook */
-    private static native String[] nativeGetMemorySignatureResult();
+    /** 内存签名扫描在 Native 层（syscall），防 Hook；advancedChecks=true 时匿名可执行内存阈值 4KB */
+    private static native String[] nativeGetMemorySignatureResult(boolean advancedChecks);
     /** Native Hook 检测（内联/PLT/GOT），增强 Xposed 检测 */
     private static native String[] nativeDetectHook();
     /** Native Xposed 特征路径与 /proc/self/fd（linjector 等）检测 */
@@ -46,7 +47,7 @@ public class DebugDetectionManager {
         List<DetectionResult> results = new ArrayList<>();
         results.add(detectFridaThreads());
         results.add(detectFridaPorts());
-        results.add(detectMemorySignatures());
+        results.add(detectMemorySignatures(context));
         results.add(detectNamedPipes());
         results.add(detectPtraceStatus());
         results.add(detectDebuggerAttached());
@@ -91,8 +92,13 @@ public class DebugDetectionManager {
         return result;
     }
 
-    private DetectionResult detectMemorySignatures() {
-        String[] raw = nativeGetMemorySignatureResult();
+    private DetectionResult detectMemorySignatures(Context context) {
+        boolean advancedChecks = false;
+        if (context != null) {
+            SharedPreferences prefs = context.getSharedPreferences("sentry_prefs", Context.MODE_PRIVATE);
+            advancedChecks = prefs.getBoolean("advanced_checks", false);
+        }
+        String[] raw = nativeGetMemorySignatureResult(advancedChecks);
         if (raw == null || raw.length < 2) {
             return new DetectionResult("Memory Signatures", "Scan failed", DetectionResult.STATUS_WARNING);
         }

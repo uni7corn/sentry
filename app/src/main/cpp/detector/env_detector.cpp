@@ -402,6 +402,24 @@ static const void *my_memmem(const void *haystack, size_t haylen, const void *ne
     return nullptr;
 }
 
+/* 关键系统库：Frida inline hook 常见目标，显式检测提高命中率 */
+static const char *CRITICAL_SO_PATTERNS[] = {
+    "libart",    /* libart.so：ART 运行时 */
+    "libc.so",   /* libc.so：C 库 */
+    "libc++.so", /* libc++ */
+    nullptr
+};
+
+/* 是否为可疑 .so 映射（路径含 .so 或关键系统库） */
+static bool is_suspicious_so_mapping(const char *mapping) {
+    if (!mapping) return false;
+    if (my_strstr(mapping, ".so") != nullptr) return true;
+    for (int i = 0; CRITICAL_SO_PATTERNS[i] != nullptr; i++) {
+        if (str_contains_ci(mapping, CRITICAL_SO_PATTERNS[i])) return true;
+    }
+    return false;
+}
+
 /* Smaps 检测：可执行段中 Private_Dirty > 0 的可疑注入（正常代码段不应有 Private_Dirty） */
 static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) {
     int fd = my_open("/proc/self/smaps", 0, 0);  /* O_RDONLY */
@@ -413,7 +431,7 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
     int n = 0;
     size_t line_pos = 0;
 
-    char buf[256];
+    char buf[512];
     ssize_t rd;
     while ((rd = my_read(fd, buf, sizeof(buf))) > 0 && n < max_details) {
         for (ssize_t i = 0; i < rd && n < max_details; i++) {
@@ -429,11 +447,22 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
                 /* 在可执行段中查找 Private_Dirty */
                 if (in_executable && my_strstr(line, "Private_Dirty:") != nullptr) {
                     int dirty_kb = 0;
-                    sscanf(line, "Private_Dirty: %d kB", &dirty_kb);
-                    if (dirty_kb > 0 && my_strstr(current_mapping, ".so") != nullptr) {
-                        snprintf(details[n], 256, "Smaps: executable .so with Private_Dirty %d kB: %s",
-                                 dirty_kb, current_mapping);
-                        n++;
+                    if (sscanf(line, "Private_Dirty: %d kB", &dirty_kb) >= 1 ||
+                        sscanf(line, "Private_Dirty: %d KB", &dirty_kb) >= 1) {
+                        if (dirty_kb > 0 && is_suspicious_so_mapping(current_mapping)) {
+                            /* 关键库用更明确的文案，与其他扫描器一致 */
+                            if (str_contains_ci(current_mapping, "libart")) {
+                                snprintf(details[n], 256, "SMAPS: libart.so executable segment has Private_Dirty: %d kB (code patched)",
+                                         dirty_kb);
+                            } else if (str_contains_ci(current_mapping, "libc.so") || str_contains_ci(current_mapping, "libc++.so")) {
+                                snprintf(details[n], 256, "SMAPS: libc.so executable segment has Private_Dirty: %d kB (code patched)",
+                                         dirty_kb);
+                            } else {
+                                snprintf(details[n], 256, "SMAPS: executable .so with Private_Dirty %d kB: %s",
+                                         dirty_kb, current_mapping);
+                            }
+                            n++;
+                        }
                     }
                     in_executable = false;
                 }

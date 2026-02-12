@@ -37,6 +37,9 @@ static const char *FRIDA_SIGNATURES[] = {
     "XposedBridge.jar",
     "de.robv.android.xposed",
     "org.lsposed",
+    /* Zygisk LSPosed：maps 中 /data/adb/modules/zygisk_lsposed/zygisk/arm64-v8a.so */
+    "zygisk_lsposed",
+    "zygisk",
     nullptr
 };
 
@@ -44,8 +47,9 @@ static const char *FRIDA_SIGNATURES[] = {
 static char s_findings[MAX_MEMORY_FINDINGS][256];
 static int s_finding_count = 0;
 
-/* 匿名可执行内存：LSPosed 隐藏 so 时仍保留可执行权限，阈值 128KB 降低 JIT 误报 */
-#define ANON_EXEC_SIZE_THRESHOLD (128 * 1024)
+/* 匿名可执行内存：LSPosed 隐藏 so 时仍保留可执行权限；默认 128KB 降低 JIT 误报，高级模式 4KB */
+#define ANON_EXEC_SIZE_THRESHOLD_DEFAULT (128 * 1024)
+#define ANON_EXEC_SIZE_THRESHOLD_ADVANCED (4 * 1024)
 #define MAX_ANON_EXEC_FINDINGS 2
 
 static bool has_exec_perm(const char *perms) {
@@ -72,7 +76,7 @@ static bool is_anon_path(const char *path) {
 }
 
 static void check_anon_exec_memory(const char *line, char (*findings)[256], int max_findings,
-                                   int *count, int *anon_count) {
+                                   int *count, int *anon_count, size_t size_threshold) {
     if (*anon_count >= MAX_ANON_EXEC_FINDINGS) return;
     unsigned long start = 0, end = 0;
     char perms[8] = {0};
@@ -80,7 +84,7 @@ static void check_anon_exec_memory(const char *line, char (*findings)[256], int 
     if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %383s", &start, &end, perms, path) < 3)
         return;
     size_t size = end - start;
-    if (size < ANON_EXEC_SIZE_THRESHOLD || !has_exec_perm(perms) || !is_anon_path(path))
+    if (size < size_threshold || !has_exec_perm(perms) || !is_anon_path(path))
         return;
     if (*count < max_findings) {
         snprintf(findings[*count], 256, "Anonymous executable memory: %lx-%lx (size: %zu KB)",
@@ -91,8 +95,13 @@ static void check_anon_exec_memory(const char *line, char (*findings)[256], int 
 }
 
 int get_memory_signature_details(char (*details)[256], int max_details) {
+    return get_memory_signature_details_ex(details, max_details, false);
+}
+
+int get_memory_signature_details_ex(char (*details)[256], int max_details, int advanced_checks) {
     s_finding_count = 0;
     int anon_exec_count = 0;
+    size_t anon_threshold = advanced_checks ? ANON_EXEC_SIZE_THRESHOLD_ADVANCED : ANON_EXEC_SIZE_THRESHOLD_DEFAULT;
     int fd = my_open("/proc/self/maps", 0, 0);  /* O_RDONLY */
     if (fd < 0) {
         LOGD("Failed to open /proc/self/maps");
@@ -120,7 +129,7 @@ int get_memory_signature_details(char (*details)[256], int max_details) {
                     }
                 }
                 /* 匿名可执行内存：LSPosed 隐藏 so 时仍保留可执行权限 */
-                check_anon_exec_memory(line, s_findings, MAX_MEMORY_FINDINGS, &s_finding_count, &anon_exec_count);
+                check_anon_exec_memory(line, s_findings, MAX_MEMORY_FINDINGS, &s_finding_count, &anon_exec_count, anon_threshold);
 
                 line_pos = 0;
             } else {

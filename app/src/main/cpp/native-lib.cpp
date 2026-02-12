@@ -56,10 +56,11 @@ Java_anti_rusda_detector_DebugDetectionManager_nativeDetectHook(JNIEnv *env, jcl
 }
 
 // Memory signature result for Java: String[] { status, summary, detail0, ... } (uses syscall)
+// advancedChecks=true: anon exec memory threshold 4KB (vs 128KB default)
 JNIEXPORT jobjectArray JNICALL
-Java_anti_rusda_detector_DebugDetectionManager_nativeGetMemorySignatureResult(JNIEnv *env, jclass clazz) {
+Java_anti_rusda_detector_DebugDetectionManager_nativeGetMemorySignatureResult(JNIEnv *env, jclass clazz, jboolean advancedChecks) {
     char details[MAX_MEMORY_DETAILS][256];
-    int n = get_memory_signature_details(details, MAX_MEMORY_DETAILS);
+    int n = get_memory_signature_details_ex(details, MAX_MEMORY_DETAILS, advancedChecks ? 1 : 0);
     int status = (n > 0) ? 2 : 0;  // 2 = DANGER, 0 = NORMAL
     jclass stringClass = env->FindClass("java/lang/String");
     if (!stringClass) return nullptr;

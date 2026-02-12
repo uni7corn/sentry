@@ -124,7 +124,7 @@
     <string name="auto_scan">Auto scan on launch</string>
     <string name="auto_scan_summary">Automatically scan when app starts</string>
     <string name="advanced_checks">Advanced checks</string>
-    <string name="advanced_checks_summary">Include more thorough but slower checks</string>
+    <string name="advanced_checks_summary">Include VMAP 4KB threshold (vs 128KB default); may increase false positives</string>
 
     <!-- Privacy Settings -->
     <string name="collect_diagnostics">Collect diagnostics</string>
