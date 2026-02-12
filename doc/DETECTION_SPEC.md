@@ -18,6 +18,8 @@ Sentry 提供 **18 项** 安全检测，分为两类：
 
 ### 1.1 检测项与权重一览表
 
+**执行顺序**：与 `runAllDetections()` 一致。调试检测 1→9 由 `DebugDetectionManager` 顺序执行；环境检测 10→18 由 `EnvDetectionManager` 顺序执行。`DetectionManager.runAllDetections()` 先执行全部调试 9 项、再执行全部环境 9 项（顺序执行，非并行）。
+
 | 序号 | 检测项标题 | 类别 | maxScore | warnOnly | 说明 |
 |------|------------|------|----------|----------|------|
 | 1 | Frida Threads | 调试 | 10 | — | 检测 Frida 线程名 |
@@ -80,7 +82,7 @@ Sentry 提供 **18 项** 安全检测，分为两类：
 | **实现层** | Java（`DebugDetectionManager.detectMapsViaExec()`） |
 | **实现** | `Process.myPid()` 获取当前 PID，执行 `cat /proc/<pid>/maps`，`BufferedReader` 逐行读取；每行与 `MAPS_SUSPICIOUS_SIGNATURES` 做不区分大小写匹配（与 `memory_scanner.cpp` 的 FRIDA_SIGNATURES 一致：frida、gum-js、gobject、gmain、liblspd.so、libriru.so、libxposed、org.lsposed、zygisk 等）；命中则 DANGER，最多记录 16 条详情；exec 失败或异常时 WARNING |
 | **状态** | 发现任一行包含可疑签名 → `DANGER`；未发现 → `NORMAL`；无法执行/读取 → `WARNING` |
-| **设计说明** | 检测两次 maps：一次 Native syscall，一次 Java exec，降低单一通道被 hook 导致漏检的概率 |
+| **设计说明** | 检测两次 maps：一次 Native syscall，一次 Java exec，降低单一通道被 hook 导致漏检的概率。代码/UI 中该项标题为 `Maps detection (Java exec)` |
 
 ### 2.5 Named Pipes
 
@@ -259,8 +261,9 @@ Sentry 提供 **18 项** 安全检测，分为两类：
 安全百分比 = (总分 / 满分) × 100%
 ```
 
-- 调试检测 7 项 + 环境检测 10 项，共 17 项
-- 总分在概览页以百分比形式展示
+- 调试检测 9 项 + 环境检测 9 项，共 18 项
+- **满分** = 调试 9×10 + 环境（15+12+5+10+10+10+5+5+8）= 90 + 80 = **170**
+- 总分在概览页以百分比形式展示：`安全百分比 = (Σ earnedScore / 170) × 100%`
 
 ### 4.4 Native 返回格式
 
@@ -314,19 +317,21 @@ App 启动
     ↓
 DetectionManager 初始化
     ↓
-并行执行 {
-    DebugDetectionManager.runAllDetections()   ← 8 项
-    EnvDetectionManager.runAllDetections()     ← 10 项
+顺序执行 {
+    DebugDetectionManager.runAllDetections()   ← 9 项（会先 load libantidebug + libenvdetect）
+    EnvDetectionManager.runAllDetections()     ← 9 项（依赖 libenvdetect）
 }
     ↓
-收集 DetectionResult 列表
+收集 DetectionResult 列表（共 18 个 DetectionResult）
     ↓
-总分 = Σ(earnedScore) / Σ(maxScore)
+总分 = Σ(earnedScore) / 170（满分）
     ↓
 UI 展示（OverviewFragment）
     - 总分百分比
     - 分类详情（调试检测 Tab / 环境检测 Tab）
 ```
+
+**依赖关系**：调试检测中的「Dirty Page / Memory Injection」实现在 `libenvdetect.so`（`env_detect_zygisk_injection`），由 `DebugDetectionManager.ensureNativeLoaded()` 在运行前加载 `libenvdetect`，故调试 Tab 会同时依赖两个 Native 库。
 
 ---
 
@@ -349,7 +354,7 @@ UI 展示（OverviewFragment）
 | detectFridaThreads | `nativeDetectFridaThreads` | `thread_detector` |
 | detectFridaPorts | `nativeGetFridaPortScanResult` | `port_scanner` |
 | detectMemorySignatures | `nativeGetMemorySignatureResult` | `memory_scanner` |
-| detectMapsViaExec      | —（Java exec）                   | 读 `/proc/pid/maps` 二次检测 |
+| detectMapsViaExec（Maps 二次检测） | —（Java exec） | 读 `/proc/pid/maps` 二次检测；UI 标题 `Maps detection (Java exec)` |
 | detectNamedPipes | — | Java 读 `/proc/self/net/unix` |
 | detectPtraceStatus | — | Java 读 `/proc/self/status` (TracerPid) |
 | detectDebuggerAttached | — | Java `Debug.isDebuggerConnected()` |
@@ -439,6 +444,7 @@ UI 展示（OverviewFragment）
 
 - 状态常量：`STATUS_NORMAL=0`、`STATUS_WARNING=1`、`STATUS_DANGER=2`
 - 得分逻辑：NORMAL 得满分，WARNING 得一半（若 `warnOnly=true` 则仍得满分），DANGER 得 0
+- 常用构造：`(title, summary, status)` 使用默认 `maxScore=10`、`warnOnly=false`；`(title, summary, status, maxScore)`；`(title, summary, status, maxScore, details)`；`(title, summary, status, maxScore, details, warnOnly)`。带 details 的构造用于列表展开展示详情。
 
 ```java
 /** 根据状态得到该项得分：NORMAL=满分，WARNING=一半（warnOnly 时为满分），DANGER=0 */
@@ -459,19 +465,21 @@ public int getEarnedScore() {
 
 **文件**：`app/src/main/java/anti/rusda/detector/DebugDetectionManager.java`
 
-- 一次执行 7 项检测；敏感项通过 JNI 调用 Native（syscall），避免 Java 层被 Hook。
+- 一次执行 **9 项**检测；敏感项通过 JNI 调用 Native（syscall），避免 Java 层被 Hook。`ensureNativeLoaded()` 会先加载 `libantidebug` 与 `libenvdetect`（Dirty Page 检测在 libenvdetect 中实现）。
 
 ```java
 public List<DetectionResult> runAllDetections(Context context) {
     ensureNativeLoaded();
     List<DetectionResult> results = new ArrayList<>();
-    results.add(detectFridaThreads());      // Native
-    results.add(detectFridaPorts());        // Native
-    results.add(detectMemorySignatures());  // Native
-    results.add(detectNamedPipes());        // Java 读 /proc/self/net/unix
-    results.add(detectPtraceStatus());     // Java 读 /proc/self/status (TracerPid)
-    results.add(detectDebuggerAttached());  // Java Debug.isDebuggerConnected()
+    results.add(detectFridaThreads());           // Native (thread_detector)
+    results.add(detectFridaPorts());             // Native (port_scanner)
+    results.add(detectMemorySignatures(context)); // Native (memory_scanner)，advancedChecks 来自设置
+    results.add(detectMapsViaExec());             // Java exec 读 /proc/pid/maps 二次检测
+    results.add(detectNamedPipes());             // Java 读 /proc/self/net/unix
+    results.add(detectPtraceStatus());           // Java 读 /proc/self/status (TracerPid)
+    results.add(detectDebuggerAttached());       // Java Debug.isDebuggerConnected()
     results.add(checkLibraryIntegrity(context)); // Java + Native (Xposed/Hook)
+    results.add(detectZygiskInjection());        // Native libenvdetect (Dirty Page / Memory Injection)
     return results;
 }
 
@@ -662,7 +670,7 @@ JNIEXPORT jobjectArray JNICALL Java_..._nativeDetectMagisk(...) {
 
 **文件**：`app/src/main/java/anti/rusda/detector/EnvDetectionManager.java`
 
-- `runAllDetections()` 依次调用 10 项环境检测；Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
+- `runAllDetections()` 依次调用 **9 项**环境检测，顺序为：Bootloader、Magisk/Root、Dangerous Apps、Suspicious Files、Emulator、Kernel Patch、ADB Debug、Multi-instance、Container。Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
 - **ADB Debug** 检测（多通道抗 hook）：① **Native** `nativeDetectAdb()`：syscall 端口 5555–5558、`/proc/net/tcp`、adbd 进程、sysfs USB 状态；② **Java Settings API**：`development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled`；③ **Java exec**：`getprop init.svc.adbd`、`settings get global adb_enabled` 等，绕过 ContentResolver hook。任一项通道发现 → WARNING。
 - 使用 `warnOnly=true`，WARNING 时仍得满分，仅 UI 提示。
 
@@ -675,3 +683,14 @@ return new DetectionResult("ADB Debug", summary, status, 5, details, true);  // 
 **文件**：`app/src/main/cpp/utils/syscall_utils.h` / `syscall_utils.cpp`
 
 - 提供：`my_open`、`my_read`、`my_close`、`my_lseek`、`my_access`、`my_socket`、`my_connect`、`my_strstr`、`my_strcasestr`、`my_strcmp` 等，内部使用架构对应 syscall 号（如 `__NR_openat`、`__NR_read`、`__NR_lseek`），避免经过 libc 从而降低被 Frida/Xposed Hook 的概率。
+
+---
+
+## 十三、版本与可选行为
+
+| 项目 | 说明 |
+|------|------|
+| **advancedChecks** | 设置 → 高级检测：为 true 时，Memory Signatures 的匿名可执行内存阈值从 128KB 降为 4KB，可发现更小匿名可执行区（可能增加误报）。 |
+| **Key Attestation** | 仅 API 28+ 可用；API&lt;28 或设备不支持时返回 NORMAL/WARNING，不判 DANGER。 |
+| **Dangerous Apps (QUERY_ALL_PACKAGES)** | Android 11+ 若需通过包名查询所有应用，需在 Manifest 声明 `QUERY_ALL_PACKAGES` 或配置 &lt;queries&gt;。 |
+| **Native 库加载** | 调试检测会依次 `System.loadLibrary("antidebug")`、`System.loadLibrary("envdetect")`；环境检测仅需 `envdetect`。任一 load 失败时对应 Native 检测可能返回 WARNING 或失败态。 |
