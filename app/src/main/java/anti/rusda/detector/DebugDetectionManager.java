@@ -32,10 +32,15 @@ public class DebugDetectionManager {
     private static native String[] nativeDetectHook();
     /** Native Xposed 特征路径与 /proc/self/fd（linjector 等）检测 */
     private static native String[] nativeDetectXposedPaths();
+    /** Zygisk 注入检测（Smaps Private_Dirty + VMap + Pagemap），实现位于 libenvdetect */
+    private static native String[] nativeDetectZygiskInjection();
 
     public static void ensureNativeLoaded() {
         try {
             System.loadLibrary("antidebug");
+        } catch (Throwable ignored) { }
+        try {
+            System.loadLibrary("envdetect");
         } catch (Throwable ignored) { }
     }
 
@@ -55,6 +60,7 @@ public class DebugDetectionManager {
         results.add(detectPtraceStatus());
         results.add(detectDebuggerAttached());
         results.add(checkLibraryIntegrity(context));
+        results.add(detectZygiskInjection());
         return results;
     }
 
@@ -114,6 +120,25 @@ public class DebugDetectionManager {
                 ? Arrays.asList(Arrays.copyOfRange(raw, 2, raw.length))
                 : Collections.emptyList();
         DetectionResult result = new DetectionResult("Memory Signatures", summary, status);
+        result.setDetails(details);
+        return result;
+    }
+
+    /** 脏页/内存注入检测：Smaps Private_Dirty + VMap + Pagemap bit 55（实现位于 libenvdetect，可发现 Zygisk/Frida 等）。 */
+    private DetectionResult detectZygiskInjection() {
+        String[] raw = nativeDetectZygiskInjection();
+        if (raw == null || raw.length < 2) {
+            return new DetectionResult("Dirty Page / Memory Injection", "Scan failed", DetectionResult.STATUS_WARNING);
+        }
+        int status = DetectionResult.STATUS_NORMAL;
+        try {
+            status = Integer.parseInt(raw[0]);
+        } catch (NumberFormatException ignored) { }
+        String summary = raw[1];
+        List<String> details = raw.length > 2
+                ? Arrays.asList(Arrays.copyOfRange(raw, 2, raw.length))
+                : Collections.emptyList();
+        DetectionResult result = new DetectionResult("Dirty Page / Memory Injection", summary, status);
         result.setDetails(details);
         return result;
     }
@@ -180,7 +205,7 @@ public class DebugDetectionManager {
         String summary = status == DetectionResult.STATUS_NORMAL
                 ? "Maps clean (Java exec)"
                 : (details.size() + " suspicious mapping(s) in maps (Java exec)");
-        return new DetectionResult("Maps 二次检测 (Java exec)", summary, status, details);
+        return new DetectionResult("Maps detection (Java exec)", summary, status, details);
     }
 
     private DetectionResult detectNamedPipes() {

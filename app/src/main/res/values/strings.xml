@@ -84,7 +84,7 @@
 
     <!-- Detection Details -->
     <string name="detail_frida_threads">Checking for Frida-related threads in process</string>
-    <string name="detail_frida_ports">Scan Frida default ports (27042, 27043, 27044) and frida-server process with listening TCP</string>
+    <string name="detail_frida_ports">Scan Frida default port 27042 and frida-server process with listening TCP</string>
     <string name="detail_frida_memory">Scanning memory for Frida agent signatures</string>
     <string name="detail_debug_mode">Checking if debugger is attached</string>
     <string name="detail_hooks">Detecting function hooks and inline patches</string>

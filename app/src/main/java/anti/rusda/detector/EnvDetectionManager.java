@@ -55,7 +55,6 @@ public class EnvDetectionManager {
     private static native String[] nativeDetectMagisk();
     private static native String[] nativeDetectBootloader();
     private static native String[] nativeDetectSuspiciousFiles();
-    private static native String[] nativeDetectZygiskInjection();
     private static native String[] nativeDetectEmulator(String hardware, String product, String device, String brand);
     private static native boolean nativeCheckPort(int port);
     /** 多通道 Native ADB 检测（syscall）：端口、net/tcp、adbd 进程、sysfs；返回 String[] { status, summary, ... } */
@@ -74,7 +73,6 @@ public class EnvDetectionManager {
         List<DetectionResult> results = new ArrayList<>();
         results.add(detectBootloader());
         results.add(detectRoot());
-        results.add(detectZygiskInjection());
         results.add(detectXposedModules());
         results.add(detectSuspiciousFiles());
         results.add(detectEmulator());
@@ -248,15 +246,6 @@ public class EnvDetectionManager {
             }
         } catch (Exception ignored) { }
         return found;
-    }
-
-    /**
-     * Zygisk 注入检测：Smaps Private_Dirty + VMap 内存映射扫描（Zygisk/LSPosed/ZygiskNext 特征）。
-     * LSPosed Hook 已合并至调试检测的 Xposed / Hook Framework。
-     */
-    private DetectionResult detectZygiskInjection() {
-        return fromNativeResult("Zygisk Injection", nativeDetectZygiskInjection(),
-                "No Zygisk injection detected", "Smaps and memory maps scan clean");
     }
 
     /**

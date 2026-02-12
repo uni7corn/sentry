@@ -104,10 +104,8 @@ static bool detect_frida_server_listening(void) {
     return false;
 }
 
-// Frida 经典默认端口（不含 5000/8080 等通用端口，误报率高；Frida 16+ 支持随机端口，另靠 frida-server 进程名 + net/tcp 检测）
-static const int FRIDA_PORTS[] = {
-    27042, 27043, 27044, 0
-};
+// 仅检测 Frida 默认端口 27042；Frida 16+ 随机端口靠 frida-server 进程名 + net/tcp 检测
+static const int FRIDA_PORTS[] = { 27042, 0 };
 
 // Last scan result for JNI to build DetectionResult (title/summary/details)
 #define MAX_OPEN_PORTS 8
@@ -150,23 +148,31 @@ bool detect_frida_ports(void) {
         }
     }
 
-    /* 本进程 net/tcp 中的 Frida 经典端口十六进制码（27042=0x699A, 27043=0x699B, 27044=0x699C）*/
-    int fd = my_open("/proc/self/net/tcp", O_RDONLY, 0);
+    /* 系统 net/tcp 中 LISTEN(0A) 行的 Frida 端口 27042(0x699A)；边界匹配 ":699A " 避免误报 */
+    const char *net_tcp_path = "/proc/net/tcp";
+    int fd = my_open(net_tcp_path, O_RDONLY, 0);
     if (fd >= 0) {
         char buffer[4096];
         ssize_t n = my_read(fd, buffer, sizeof(buffer) - 1);
         my_close(fd);
-        if (n > 0) {
+        if (n > 0 && s_open_port_count < MAX_OPEN_PORTS) {
             buffer[n] = '\0';
-            if (my_strstr(buffer, "699A") || my_strstr(buffer, "699B") || my_strstr(buffer, "699C")) {
-                LOGD("Frida port pattern in /proc/net/tcp");
-                found = true;
-                if (s_open_port_count < MAX_OPEN_PORTS) {
-                    int p = 27042;
+            const char *line = buffer;
+            while (*line) {
+                const char *eol = my_strstr(line, "\n");
+                const char *end = eol ? eol : (line + my_strlen(line));
+                if (end > line && my_strstr(line, " 0A ") != nullptr && my_strstr(line, ":699A ") != nullptr) {
                     int j;
-                    for (j = 0; j < s_open_port_count; j++) if (s_open_ports[j] == p) break;
-                    if (j >= s_open_port_count) s_open_ports[s_open_port_count++] = p;
+                    for (j = 0; j < s_open_port_count; j++) if (s_open_ports[j] == 27042) break;
+                    if (j >= s_open_port_count) {
+                        s_open_ports[s_open_port_count++] = 27042;
+                        LOGD("Frida port 27042 (LISTEN) in %s", net_tcp_path);
+                        found = true;
+                    }
+                    break; /* 只检测 27042，找到即可 */
                 }
+                if (!eol) break;
+                line = eol + 1;
             }
         }
     }

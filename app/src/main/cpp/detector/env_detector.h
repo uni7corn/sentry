@@ -16,7 +16,7 @@ int env_detect_bootloader(int *out_status, char (*details)[256], int max_details
 // Suspicious files (Frida, adb paths) - returns count; no debug_ramdisk
 int env_detect_suspicious_files(char (*details)[256], int max_details);
 
-// Zygisk injection: Smaps Private_Dirty + VMap signature scan; returns count, DANGER when > 0
+// Dirty page / memory injection: Smaps Private_Dirty + VMap + Pagemap bit 55; returns count, DANGER when > 0
 int env_detect_zygisk_injection(char (*details)[256], int max_details);
 
 // Read /proc/version for fingerprint (caller must free returned string)

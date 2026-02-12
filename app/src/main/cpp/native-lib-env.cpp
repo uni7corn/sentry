@@ -70,15 +70,15 @@ Java_anti_rusda_detector_EnvDetectionManager_nativeDetectBootloader(JNIEnv *env,
     return buildResult(env, status, summary, details, n);
 }
 
-// Zygisk injection: Smaps Private_Dirty + VMap signature scan; returns String[] { status, summary, ... }
+// Dirty page / memory injection (Debug tab): Smaps Private_Dirty + VMap + Pagemap bit 55; returns String[] { status, summary, ... }
 JNIEXPORT jobjectArray JNICALL
-Java_anti_rusda_detector_EnvDetectionManager_nativeDetectZygiskInjection(JNIEnv *env, jclass clazz) {
+Java_anti_rusda_detector_DebugDetectionManager_nativeDetectZygiskInjection(JNIEnv *env, jclass clazz) {
     char details[MAX_DETAILS][256];
     int n = env_detect_zygisk_injection(details, MAX_DETAILS);
     int status = n > 0 ? 2 : 0;  // 2 = DANGER
     const char *summary = n > 0
-        ? "Zygisk injection detected"
-        : "No Zygisk injection detected";
+        ? "Dirty page or memory injection detected"
+        : "No dirty page or memory injection detected";
     return buildResult(env, status, summary, details, n);
 }
 

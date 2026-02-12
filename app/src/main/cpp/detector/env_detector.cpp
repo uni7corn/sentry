@@ -423,6 +423,20 @@ static const char *CRITICAL_SO_PATTERNS[] = {
     nullptr
 };
 
+/* Smaps 脏页检测白名单：这些 .so 允许有 Private_Dirty（系统/媒体栈正常行为），不报 DANGER */
+static const char *SMAPS_WHITELIST_SO[] = {
+    // "libstagefright.so",   /* /system/lib64/libstagefright.so 等，媒体解码常见少量脏页 */
+    nullptr
+};
+
+static bool is_smaps_whitelisted(const char *mapping) {
+    if (!mapping) return false;
+    for (int i = 0; SMAPS_WHITELIST_SO[i] != nullptr; i++) {
+        if (str_contains_ci(mapping, SMAPS_WHITELIST_SO[i])) return true;
+    }
+    return false;
+}
+
 /* 是否为可疑 .so 映射（路径含 .so 或关键系统库） */
 static bool is_suspicious_so_mapping(const char *mapping) {
     if (!mapping) return false;
@@ -467,7 +481,7 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
                     int dirty_kb = 0;
                     if (sscanf(line, "Private_Dirty: %d kB", &dirty_kb) >= 1 ||
                         sscanf(line, "Private_Dirty: %d KB", &dirty_kb) >= 1) {
-                        if (dirty_kb > 0 && is_suspicious_so_mapping(current_mapping)) {
+                        if (dirty_kb > 0 && is_suspicious_so_mapping(current_mapping) && !is_smaps_whitelisted(current_mapping)) {
                             LOGD("[smaps] Private_Dirty %d kB in executable: %s", dirty_kb, current_mapping);
                             /* 关键库用更明确的文案，与其他扫描器一致 */
                             if (str_contains_ci(current_mapping, "libart")) {

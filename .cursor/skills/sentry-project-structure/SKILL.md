@@ -5,7 +5,7 @@ description: Documents the Sentry Android security detection app structure (Java
 
 # Sentry 项目结构
 
-Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Zygisk Injection**（Smaps Private_Dirty + VMap 特征扫描 + Pagemap bit 55 软脏页检测）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。**LSPosed Hook** 已合并至调试检测的 Xposed / Hook Framework。调试检测现为 **8 项**，含 **Maps 二次检测 (Java exec)**：通过 `Runtime.exec("cat /proc/pid/maps")` 与 Native syscall 读 maps 形成双通道。
+Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。调试检测现为 **9 项**，含 **Maps 二次检测 (Java exec)**（`Runtime.exec("cat /proc/pid/maps")` 与 Native syscall 双通道）、**Dirty Page / Memory Injection**（脏页/内存注入：Smaps Private_Dirty + VMap + Pagemap bit 55，实现位于 libenvdetect，由 DebugDetectionManager 加载 envdetect 后调用）。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。**LSPosed Hook** 已合并至调试检测的 Xposed / Hook Framework。
 
 ## 目录树
 
@@ -89,7 +89,7 @@ sentry/
 
 - **命名空间/包名**: `anti.rusda`；**applicationId**: `anti.rusda`
 - **Native 库**: `libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）
-- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult`、`nativeDetectXposedPaths`、`nativeDetectHook` 等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectZygiskInjection`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeDetectAdb`、`nativeCheckCgroup`、`nativeGetEnvVersion`；Bootloader 含 Native + Java `KeyAttestationHelper.runAttestationSync()`；**Dangerous Apps** 为 Java + Native 混合（`nativeVerifyXposedModules`：APK assets/xposed_init、modules.list）；**ADB Debug** 为 `nativeDetectAdb`（端口/net/tcp/adbd/sysfs）+ Java Settings + exec 替代路径；指纹 → `nativeGetProcVersion`
+- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult`、`nativeDetectXposedPaths`、`nativeDetectHook`、`nativeDetectZygiskInjection`（实现于 libenvdetect，Debug 加载 envdetect 后调用）等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeDetectAdb`、`nativeCheckCgroup`、`nativeGetEnvVersion`；Bootloader 含 Native + Java `KeyAttestationHelper.runAttestationSync()`；**Dangerous Apps** 为 Java + Native 混合（`nativeVerifyXposedModules`：APK assets/xposed_init、modules.list）；**ADB Debug** 为 `nativeDetectAdb`（端口/net/tcp/adbd/sysfs）+ Java Settings + exec 替代路径；指纹 → `nativeGetProcVersion`
 - **检测状态**: `STATUS_NORMAL=0`(绿), `STATUS_WARNING=1`(橙), `STATUS_DANGER=2`(红)；每项有 **分数**（getEarnedScore/getMaxScore），概览页显示总分百分比
 - **ABI**: 仅 `arm64-v8a`；C++17；Android 15+ 使用 16KB 页面对齐
 - **导航**: 底部 TabLayout + ViewPager2 左右滑动，三页：概览、调试检测、环境检测
