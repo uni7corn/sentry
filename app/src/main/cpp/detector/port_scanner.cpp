@@ -2,7 +2,7 @@
 #include "../utils/syscall_utils.h"
 #include <android/log.h>
 
-#define LOG_TAG "AntiFrida"
+#define LOG_TAG "SentryTag"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 // Avoid libc: use raw constants and minimal struct for syscall args

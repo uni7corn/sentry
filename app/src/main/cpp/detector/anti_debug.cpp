@@ -11,7 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define LOG_TAG "AntiFrida"
+#define LOG_TAG "SentryTag"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 // Use syscall directly to bypass potential hooks

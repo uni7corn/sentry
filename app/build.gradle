@@ -48,10 +48,12 @@ android {
             }
         }
         debug {
+            // 使用与 release 相同的 Native 优化级别 (-O2)，避免 Run 时检测行为与打包后不一致
+            // 原因：-O0 会改变内联、栈帧、LR 检测等行为，导致部分检测在 debug 下失效
             externalNativeBuild {
                 cmake {
-                    cppFlags "-O0 -g"
-                    cFlags "-O0 -g"
+                    cppFlags "-O2 -fvisibility=hidden -g"
+                    cFlags "-O2 -fvisibility=hidden -g"
                 }
             }
         }

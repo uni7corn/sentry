@@ -1,5 +1,6 @@
 #include "env_detector.h"
 #include "utils/syscall_utils.h"
+#include <android/log.h>
 #include <dirent.h>
 #include <cstdint>
 #include <cstdlib>
@@ -11,6 +12,9 @@
 #include <sys/socket.h>
 #include <dlfcn.h>
 
+#define LOG_TAG "SentryTag"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
 #endif
@@ -19,8 +23,12 @@
 #define SOCK_STREAM  1
 #define IPPROTO_TCP  6
 #define SOL_SOCKET   1
+#ifndef SO_RCVTIMEO
 #define SO_RCVTIMEO  20
+#endif
+#ifndef SO_SNDTIMEO
 #define SO_SNDTIMEO  21
+#endif
 #define CONNECT_TIMEOUT_SEC 2
 
 /* ZIP local file header: 0x04034b50, then at 0x1A filename_len (2 bytes), 0x1C extra_len (2 bytes) */
@@ -430,6 +438,7 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
     int fd = my_open("/proc/self/smaps", 0, 0);  /* O_RDONLY */
     if (fd < 0) return 0;
 
+    LOGD("[smaps] scanning /proc/self/smaps for Private_Dirty in executable segments");
     char line[512];
     bool in_executable = false;
     char current_mapping[384] = {0};
@@ -443,6 +452,10 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
             if (buf[i] == '\n' || line_pos >= sizeof(line) - 1) {
                 line[line_pos] = '\0';
                 line_pos = 0;
+                /* Logcat: 扫描 smaps 时打印每行内容（脏页检测） */
+                if (line[0] != '\0') {
+                    LOGD("[smaps] %s", line);
+                }
                 /* 匹配内存映射行（权限包含 r-xp 或 r-x） */
                 if (my_strstr(line, "r-xp") != nullptr || my_strstr(line, "r-x") != nullptr) {
                     in_executable = true;
@@ -455,6 +468,7 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
                     if (sscanf(line, "Private_Dirty: %d kB", &dirty_kb) >= 1 ||
                         sscanf(line, "Private_Dirty: %d KB", &dirty_kb) >= 1) {
                         if (dirty_kb > 0 && is_suspicious_so_mapping(current_mapping)) {
+                            LOGD("[smaps] Private_Dirty %d kB in executable: %s", dirty_kb, current_mapping);
                             /* 关键库用更明确的文案，与其他扫描器一致 */
                             if (str_contains_ci(current_mapping, "libart")) {
                                 snprintf(details[n], 256, "SMAPS: libart.so executable segment has Private_Dirty: %d kB (code patched)",
@@ -486,12 +500,13 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
     return n;
 }
 
-/* Pagemap bit 61 (soft-dirty) 检测：内核管理，用户态无法伪造
- * Frida inline hook 触发 COW 后，页面的 soft-dirty 置位，即使还原字节码也不会清除 */
+/* Pagemap bit 55 (soft-dirty) 检测：内核管理，用户态无法伪造
+ * Frida inline hook 触发 COW 后，页面的 soft-dirty 置位，即使还原字节码也不会清除
+ * 注意：bit 61 是 file-page/shared-anon，libc 为文件映射故 bit 61 恒为 1，误用会导致误报 */
 #define PAGEMAP_PAGE_SIZE 4096
 #define PAGEMAP_ENTRY_SIZE 8
 #define PAGEMAP_BIT_PRESENT 63
-#define PAGEMAP_BIT_SOFT_DIRTY 61
+#define PAGEMAP_BIT_SOFT_DIRTY 55
 
 /* 检查某虚拟地址所在页是否 soft-dirty（曾被 COW 修改） */
 static bool check_pagemap_soft_dirty(void *vaddr, char *detail_out, size_t detail_len) {
@@ -515,9 +530,12 @@ static bool check_pagemap_soft_dirty(void *vaddr, char *detail_out, size_t detai
     bool present = (entry >> PAGEMAP_BIT_PRESENT) & 1;
     bool soft_dirty = (entry >> PAGEMAP_BIT_SOFT_DIRTY) & 1;
 
-    if (present && soft_dirty && detail_out && detail_len > 0) {
-        snprintf(detail_out, detail_len, "PAGEMAP: libc %s page has soft-dirty bit set (COW/Frida hook)",
-                 vaddr ? "func" : "");
+    if (present && soft_dirty) {
+        LOGD("[pagemap] soft-dirty page at vaddr %p (present=%d)", vaddr, present);
+        if (detail_out && detail_len > 0) {
+            snprintf(detail_out, detail_len, "PAGEMAP: libc %s page has soft-dirty bit set (COW/Frida hook)",
+                     vaddr ? "func" : "");
+        }
     }
     return (present && soft_dirty);
 }
@@ -534,6 +552,7 @@ static int detect_pagemap_libc_hooks(char (*details)[256], int max_details) {
         if (!addr) continue;
 
         if (check_pagemap_soft_dirty(addr, nullptr, 0)) {
+            LOGD("[pagemap] libc %s() page has soft-dirty bit (Frida COW fingerprint)", names[i]);
             snprintf(details[n], 256, "PAGEMAP: libc %s() page has soft-dirty bit (Frida COW fingerprint)",
                      names[i]);
             n++;
@@ -548,6 +567,7 @@ static int scan_maps_for_zygisk_signatures(char (*details)[256], int max_details
     int fd = my_open("/proc/self/maps", 0, 0);
     if (fd < 0) return 0;
 
+    LOGD("[maps] scanning /proc/self/maps for Zygisk VMap signatures");
     char line[512];
     int n = 0;
     size_t line_pos = 0;
@@ -559,6 +579,9 @@ static int scan_maps_for_zygisk_signatures(char (*details)[256], int max_details
             if (buf[i] == '\n' || line_pos >= sizeof(line) - 1) {
                 line[line_pos] = '\0';
                 line_pos = 0;
+                if (line[0] != '\0') {
+                    LOGD("[maps] %s", line);
+                }
                 /* 查找 r-x 且 anon 的映射 */
                 if (my_strstr(line, "r-x") != nullptr && my_strstr(line, "anon") != nullptr) {
                     unsigned long start = 0, end = 0;
@@ -592,7 +615,7 @@ int env_detect_zygisk_injection(char (*details)[256], int max_details) {
         int vmap_n = scan_maps_for_zygisk_signatures(details + n, max_details - n);
         n += vmap_n;
     }
-    /* Pagemap bit 61 (soft-dirty)：针对 libc fork/vfork/signal 精准检测 Frida COW 指纹 */
+    /* Pagemap bit 55 (soft-dirty)：针对 libc fork/vfork/signal 精准检测 Frida COW 指纹 */
     if (n < max_details) {
         int pagemap_n = detect_pagemap_libc_hooks(details + n, max_details - n);
         n += pagemap_n;
@@ -672,6 +695,119 @@ bool env_check_port_open(int port) {
     int result = my_connect(sock, &addr, (unsigned int)sizeof(addr));
     my_close(sock);
     return (result == 0);
+}
+
+/* PID to decimal string (avoid libc sprintf) */
+static void pid_to_str(int pid, char *buf, size_t buf_len) {
+    if (buf_len < 2) return;
+    if (pid <= 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    char tmp[16];
+    int i = 0;
+    unsigned int u = (unsigned int)pid;
+    while (u && i < 15) { tmp[i++] = (char)('0' + (u % 10)); u /= 10; }
+    size_t j = 0;
+    while (i > 0 && j < buf_len - 1) { buf[j++] = tmp[--i]; }
+    buf[j] = '\0';
+}
+
+/* ADB ports: 5555(0x15B3), 5556(0x15B4), 5557(0x15B5), 5558(0x15B6) */
+static const int ADB_PORTS[] = { 5555, 5556, 5557, 5558, 0 };
+static const char *ADB_PORT_HEX[] = { "15B3", "15B4", "15B5", "15B6", nullptr };
+
+/* Scan /proc/[pid]/comm for adbd process (syscall) */
+static bool adbd_process_running(void) {
+    char path[64];
+    char comm[32];
+    const char prefix[] = "/proc/";
+    const char suffix_comm[] = "/comm";
+    const char needle[] = "adbd";
+
+    for (int pid = 1; pid < 32768 && pid > 0; pid++) {
+        my_memset(path, 0, sizeof(path));
+        my_strcpy(path, prefix);
+        pid_to_str(pid, path + sizeof(prefix) - 1, sizeof(path) - (sizeof(prefix) - 1));
+        size_t plen = my_strlen(path);
+        if (plen + sizeof(suffix_comm) >= sizeof(path)) continue;
+        my_strcpy(path + plen, suffix_comm);
+
+        int fd = my_open(path, 0, 0);
+        if (fd < 0) continue;
+
+        my_memset(comm, 0, sizeof(comm));
+        ssize_t n = my_read(fd, comm, sizeof(comm) - 1);
+        my_close(fd);
+        if (n <= 0) continue;
+        comm[n] = '\0';
+        while (n > 0 && (comm[n - 1] == '\n' || comm[n - 1] == '\r')) comm[--n] = '\0';
+        if (my_strstr(comm, needle) != nullptr) return true;
+    }
+    return false;
+}
+
+/* Read /sys/class/android_usb/android0/state - CONFIGURED when USB ADB connected */
+static bool usb_adb_configured(void) {
+    static const char *paths[] = {
+        "/sys/class/android_usb/android0/state",
+        "/sys/class/android_usb/usb_device/state",
+        nullptr
+    };
+    for (const char **p = paths; *p; p++) {
+        int fd = my_open(*p, 0, 0);
+        if (fd < 0) continue;
+
+        char buf[32];
+        ssize_t n = my_read(fd, buf, sizeof(buf) - 1);
+        my_close(fd);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        if (my_strstr(buf, "CONFIGURED") != nullptr || my_strstr(buf, "CONNECTED") != nullptr)
+            return true;
+    }
+    return false;
+}
+
+int env_detect_adb(char (*details)[256], int max_details) {
+    int n = 0;
+
+    /* 1. Syscall port connect: 5555, 5556, 5557, 5558 */
+    for (int i = 0; ADB_PORTS[i] != 0 && n < max_details; i++) {
+        if (env_check_port_open(ADB_PORTS[i])) {
+            snprintf(details[n], 256, "ADB port %d open (syscall connect)", ADB_PORTS[i]);
+            n++;
+        }
+    }
+
+    /* 2. /proc/net/tcp - ADB ports in LISTEN (0A) - system-wide, bypass ContentResolver */
+    int fd = my_open("/proc/net/tcp", 0, 0);
+    if (fd >= 0) {
+        char buf[8192];
+        ssize_t rd = my_read(fd, buf, sizeof(buf) - 1);
+        my_close(fd);
+        if (rd > 0) {
+            buf[rd] = '\0';
+            for (int i = 0; ADB_PORT_HEX[i] != nullptr && n < max_details; i++) {
+                if (my_strstr(buf, ADB_PORT_HEX[i]) != nullptr) {
+                    snprintf(details[n], 256, "ADB port in /proc/net/tcp (hex %s)", ADB_PORT_HEX[i]);
+                    n++;
+                    break;  /* one detail for net/tcp finding */
+                }
+            }
+        }
+    }
+
+    /* 3. adbd process running - strong indicator */
+    if (adbd_process_running() && n < max_details) {
+        snprintf(details[n], 256, "adbd process detected in /proc");
+        n++;
+    }
+
+    /* 4. USB ADB state in sysfs */
+    if (usb_adb_configured() && n < max_details) {
+        snprintf(details[n], 256, "USB ADB state CONFIGURED/CONNECTED (sysfs)");
+        n++;
+    }
+
+    return n;
 }
 
 /* Check if APK (ZIP) contains assets/xposed_init using syscall - bypasses hooked metaData */

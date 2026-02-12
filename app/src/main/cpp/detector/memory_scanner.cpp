@@ -8,7 +8,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#define LOG_TAG "AntiFrida"
+#define LOG_TAG "SentryTag"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 // Frida + LSPosed + Xposed + Riru + Zygisk memory signatures (use syscall to bypass libc hook)
@@ -117,6 +117,10 @@ int get_memory_signature_details_ex(char (*details)[256], int max_details, int a
         for (ssize_t i = 0; i < bytes_read && s_finding_count < max_details; i++) {
             if (buffer[i] == '\n' || line_pos >= sizeof(line) - 1) {
                 line[line_pos] = '\0';
+                /* Logcat: 扫描 maps 时打印每行内容 */
+                if (line[0] != '\0') {
+                    LOGD("[maps] %s", line);
+                }
 
                 for (int j = 0; FRIDA_SIGNATURES[j] != nullptr && s_finding_count < max_details; j++) {
                     if (my_strcasestr(line, FRIDA_SIGNATURES[j]) != nullptr) {

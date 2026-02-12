@@ -3,11 +3,13 @@ package anti.rusda.detector;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Debug;
+import android.os.Process;
 
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,6 +50,7 @@ public class DebugDetectionManager {
         results.add(detectFridaThreads());
         results.add(detectFridaPorts());
         results.add(detectMemorySignatures(context));
+        results.add(detectMapsViaExec());
         results.add(detectNamedPipes());
         results.add(detectPtraceStatus());
         results.add(detectDebuggerAttached());
@@ -113,6 +116,71 @@ public class DebugDetectionManager {
         DetectionResult result = new DetectionResult("Memory Signatures", summary, status);
         result.setDetails(details);
         return result;
+    }
+
+    /** 与 Native memory_scanner 一致的 maps 可疑模块签名（小写，做不区分大小写匹配） */
+    private static final String[] MAPS_SUSPICIOUS_SIGNATURES = {
+            "frida", "gum-js", "gumjs", "gthread", "gobject", "gmain", "gdbus",
+            "frida-agent", "frida-gadget", "frida-server",
+            "liblspd.so", "libriru.so", "libriruloader.so",
+            "libxposed", "xposed_art", "xposed_bridge", "xposedbridge", "xposedhelpers",
+            "xposed.installer", "xposedbridge.jar", "de.robv.android.xposed",
+            "org.lsposed", "zygisk_lsposed", "zygisk"
+    };
+
+    /**
+     * 通过 Runtime.exec 读取 /proc/self/maps，做二次 maps 检测（与 Native syscall 读 maps 形成双通道）。
+     * 逐行检查是否包含可疑模块签名，与 memory_scanner 的签名列表一致。
+     */
+    private DetectionResult detectMapsViaExec() {
+        List<String> details = new ArrayList<>();
+        int status = DetectionResult.STATUS_NORMAL;
+        BufferedReader reader = null;
+        java.lang.Process process = null;
+        try {
+            process = Runtime.getRuntime().exec("cat /proc/" + android.os.Process.myPid() + "/maps");
+            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String line;
+            final int maxFindings = 16;
+            int count = 0;
+            while ((line = reader.readLine()) != null && count < maxFindings) {
+                String lineLower = line.toLowerCase();
+                for (String sig : MAPS_SUSPICIOUS_SIGNATURES) {
+                    if (lineLower.contains(sig)) {
+                        details.add(line.trim());
+                        status = DetectionResult.STATUS_DANGER;
+                        count++;
+                        break;
+                    }
+                }
+            }
+            if (status == DetectionResult.STATUS_NORMAL) {
+                details.add("No suspicious modules in maps (Java exec path)");
+            }
+            if (process != null) {
+                process.waitFor();
+            }
+        } catch (IOException e) {
+            details.add("Failed to read maps via exec: " + e.getMessage());
+            status = DetectionResult.STATUS_WARNING;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            details.add("Interrupted: " + e.getMessage());
+            status = DetectionResult.STATUS_WARNING;
+        } finally {
+            if (reader != null) {
+                try {
+                    reader.close();
+                } catch (IOException ignored) { }
+            }
+            if (process != null) {
+                process.destroy();
+            }
+        }
+        String summary = status == DetectionResult.STATUS_NORMAL
+                ? "Maps clean (Java exec)"
+                : (details.size() + " suspicious mapping(s) in maps (Java exec)");
+        return new DetectionResult("Maps 二次检测 (Java exec)", summary, status, details);
     }
 
     private DetectionResult detectNamedPipes() {

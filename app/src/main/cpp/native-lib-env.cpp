@@ -100,6 +100,18 @@ Java_anti_rusda_detector_EnvDetectionManager_nativeCheckPort(JNIEnv *env, jclass
     return env_check_port_open(static_cast<int>(port)) ? JNI_TRUE : JNI_FALSE;
 }
 
+// ADB detection: multi-channel Native (syscall), returns String[] { status, summary, detail0, ... }
+JNIEXPORT jobjectArray JNICALL
+Java_anti_rusda_detector_EnvDetectionManager_nativeDetectAdb(JNIEnv *env, jclass clazz) {
+    char details[MAX_DETAILS][256];
+    int n = env_detect_adb(details, MAX_DETAILS);
+    int status = n > 0 ? 1 : 0;  /* 1 = WARNING */
+    const char *summary = n > 0
+        ? "ADB/developer indicators detected (Native syscall)"
+        : "No ADB indicators (Native syscall)";
+    return buildResult(env, status, summary, details, n);
+}
+
 // Cgroup container check: returns String[] { status, detail }
 JNIEXPORT jobjectArray JNICALL
 Java_anti_rusda_detector_EnvDetectionManager_nativeCheckCgroup(JNIEnv *env, jclass clazz) {

@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -22,8 +23,30 @@ import anti.rusda.detector.DetectionResult;
 import anti.rusda.detector.EnvDetectionManager;
 import anti.rusda.ui.MainPagerAdapter;
 
-public class MainActivity extends BaseActivity {
 
+import java.security.MessageDigest;
+
+
+
+
+
+
+public class MainActivity extends BaseActivity {
+    public static String md5(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] bytes = md.digest(input.getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : bytes) {
+                int v = b & 0xFF;
+                if (v < 16) sb.append('0');
+                sb.append(Integer.toHexString(v));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
     static {
         System.loadLibrary("antidebug");
         try {
@@ -100,6 +123,8 @@ public class MainActivity extends BaseActivity {
         if (prefs.getBoolean("auto_scan", false)) {
             new Handler(Looper.getMainLooper()).postDelayed(this::runAllScans, 500);
         }
+
+        Log.d("SentryTag", "MainActivity    md5: " + md5("1234567890"));
     }
 
     /** 为底部 Tab 预留系统导航条（Home 条/手势条）区域，避免被遮挡 */

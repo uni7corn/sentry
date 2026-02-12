@@ -13,7 +13,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 | 类别       | 数量 | 管理类                     | 展示位置   |
 |------------|------|----------------------------|------------|
-| 调试检测   | 7    | `DebugDetectionManager`    | 调试检测 Tab |
+| 调试检测   | 8    | `DebugDetectionManager`    | 调试检测 Tab |
 | 环境检测   | 10   | `EnvDetectionManager`     | 环境检测 Tab |
 
 ### 1.1 检测项与权重一览表
@@ -22,25 +22,26 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |------|------------|------|----------|----------|------|
 | 1 | Frida Threads | 调试 | 10 | — | 检测 Frida 线程名 |
 | 2 | Frida Ports | 调试 | 10 | — | 检测 Frida 默认端口 |
-| 3 | Memory Signatures | 调试 | 10 | — | 内存映射 Frida/LSPosed 签名 |
-| 4 | Named Pipes | 调试 | 10 | — | Unix 域套接字/管道名 |
-| 5 | Ptrace / IDA Attach | 调试 | 10 | — | TracerPid 检测 |
-| 6 | Debugger Attached | 调试 | 10 | — | Debug.isDebuggerConnected() |
-| 7 | Xposed / Hook Framework | 调试 | 10 | — | Xposed/LSPosed + Native Hook |
-| 8 | Bootloader | 环境 | **15** | — | 启动验证/锁定状态 + TEE RootOfTrust |
-| 9 | Magisk / Root | 环境 | **12** | — | Magisk/root 环境 |
-| 10 | Zygisk Injection | 环境 | 10 | — | Smaps Private_Dirty + VMap 内存映射 Zygisk 特征扫描 |
-| 11 | Dangerous Apps | 环境 | **5** | **是** | 多渠道检测 Xposed 模块（meta-data、APK assets/xposed_init、modules.list）；仅警告不扣分 |
-| 12 | Suspicious Files | 环境 | 10 | — | Frida/Magisk 等可疑路径 |
-| 13 | Emulator | 环境 | 10 | — | 模拟器特征 |
-| 14 | Kernel Patch | 环境 | 10 | **是** | 安全补丁陈旧度；过期仅警告不扣分 |
-| 15 | ADB Debug | 环境 | **5** | **是** | 仅警告不扣分 |
-| 16 | Multi-instance | 环境 | **5** | — | 多开/分身环境 |
-| 17 | Container / Virtualization | 环境 | **8** | — | 容器/虚拟化 |
+| 3 | Memory Signatures | 调试 | 10 | — | 内存映射 Frida/LSPosed 签名（Native syscall 读 maps） |
+| 4 | Maps 二次检测 (Java exec) | 调试 | 10 | — | 通过 Runtime.exec 读 /proc/pid/maps 二次扫描，与 Native 双通道 |
+| 5 | Named Pipes | 调试 | 10 | — | Unix 域套接字/管道名 |
+| 6 | Ptrace / IDA Attach | 调试 | 10 | — | TracerPid 检测 |
+| 7 | Debugger Attached | 调试 | 10 | — | Debug.isDebuggerConnected() |
+| 8 | Xposed / Hook Framework | 调试 | 10 | — | Xposed/LSPosed + Native Hook |
+| 9 | Bootloader | 环境 | **15** | — | 启动验证/锁定状态 + TEE RootOfTrust |
+| 10 | Magisk / Root | 环境 | **12** | — | Magisk/root 环境 |
+| 11 | Zygisk Injection | 环境 | 10 | — | Smaps Private_Dirty + VMap 内存映射 Zygisk 特征扫描 |
+| 12 | Dangerous Apps | 环境 | **5** | **是** | 多渠道检测 Xposed 模块（meta-data、APK assets/xposed_init、modules.list）；仅警告不扣分 |
+| 13 | Suspicious Files | 环境 | 10 | — | Frida/Magisk 等可疑路径 |
+| 14 | Emulator | 环境 | 10 | — | 模拟器特征 |
+| 15 | Kernel Patch | 环境 | 10 | **是** | 安全补丁陈旧度；过期仅警告不扣分 |
+| 16 | ADB Debug | 环境 | **5** | **是** | 仅警告不扣分 |
+| 17 | Multi-instance | 环境 | **5** | — | 多开/分身环境 |
+| 18 | Container / Virtualization | 环境 | **8** | — | 容器/虚拟化 |
 
 ---
 
-## 二、调试检测（7 项）
+## 二、调试检测（8 项）
 
 ### 2.1 Frida Threads
 
@@ -48,7 +49,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Frida 运行时创建的典型 GLib/线程名，用于发现 Frida 注入 |
 | **实现层** | Native（C++，`thread_detector.cpp`） |
-| **实现** | 使用 syscall（`my_open`/`my_read`/`my_close`）读取 `/proc/self/task/*/comm`，`my_strcasestr` 匹配关键词：`gmain`、`gdbus`、`pool-spawner`、`frida-agent`、`frida-gadget`、`frida`、`gum-js-loop`、`gthread`、`gpool` |
+| **实现** | 使用 syscall（`my_open`/`my_read`/`my_close`）读取 `/proc/self/task/*/comm`，`my_strcasestr` 匹配关键词：`gmain`、`gdbus`、`pool-spawner`、`frida-agent`、`frida-gadget`、`frida`、`gum-js-loop`、`gthread`、`gpool`、`gjs-context`、`frida-helper` |
 | **状态** | 检测到任意匹配 → `DANGER`；未检测 → `NORMAL` |
 
 ### 2.2 Frida Ports
@@ -71,7 +72,17 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **状态** | 发现任一签名或可疑匿名可执行内存 → `DANGER`；未发现 → `NORMAL` |
 | **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；匿名可执行内存检测阈值 default 128KB 降低 JIT 误报；**设置 → 高级检测** 开启后阈值降至 4KB，可发现更小匿名可执行区（可能增加误报） |
 
-### 2.4 Named Pipes
+### 2.4 Maps 二次检测 (Java exec)
+
+| 属性     | 说明 |
+|----------|------|
+| **目的** | 与 Native 层读 `/proc/self/maps` 形成双通道：通过 **Runtime.exec("cat /proc/\<pid\>/maps")** 获取 maps 内容，逐行检查是否包含可疑模块签名，用于交叉验证或绕过仅 hook 了 syscall 的场景 |
+| **实现层** | Java（`DebugDetectionManager.detectMapsViaExec()`） |
+| **实现** | `Process.myPid()` 获取当前 PID，执行 `cat /proc/<pid>/maps`，`BufferedReader` 逐行读取；每行与 `MAPS_SUSPICIOUS_SIGNATURES` 做不区分大小写匹配（与 `memory_scanner.cpp` 的 FRIDA_SIGNATURES 一致：frida、gum-js、gobject、gmain、liblspd.so、libriru.so、libxposed、org.lsposed、zygisk 等）；命中则 DANGER，最多记录 16 条详情；exec 失败或异常时 WARNING |
+| **状态** | 发现任一行包含可疑签名 → `DANGER`；未发现 → `NORMAL`；无法执行/读取 → `WARNING` |
+| **设计说明** | 检测两次 maps：一次 Native syscall，一次 Java exec，降低单一通道被 hook 导致漏检的概率 |
+
+### 2.5 Named Pipes
 
 | 属性     | 说明 |
 |----------|------|
@@ -80,7 +91,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 读取 `/proc/self/net/unix`，搜索包含 `frida`、`gmain`、`gdbus` 的行 |
 | **状态** | 发现 → `DANGER`；未发现 → `NORMAL` |
 
-### 2.5 Ptrace / IDA Attach
+### 2.6 Ptrace / IDA Attach
 
 | 属性     | 说明 |
 |----------|------|
@@ -89,7 +100,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 读取 `/proc/self/status`，解析 `TracerPid:` 字段；非 0 表示被附加 |
 | **状态** | `TracerPid != 0` → `DANGER`；否则 `NORMAL` |
 
-### 2.6 Debugger Attached
+### 2.7 Debugger Attached
 
 | 属性     | 说明 |
 |----------|------|
@@ -98,7 +109,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 调用 `Debug.isDebuggerConnected()` |
 | **状态** | 已连接 → `DANGER`；否则 `NORMAL` |
 
-### 2.7 Xposed / Hook Framework
+### 2.8 Xposed / Hook Framework
 
 | 属性     | 说明 |
 |----------|------|
@@ -138,7 +149,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Magisk Zygisk、ZygiskNext、LSPosed、Frida 等通过内存注入的进程内特征 |
 | **实现层** | Native（`env_detector.cpp`，`env_detect_zygisk_injection`） |
-| **实现** | 1) **Smaps 检测**：读取 `/proc/self/smaps`，解析可执行段（`r-xp`/`r-x`），若 `.so` 或关键系统库（`libart.so`、`libc.so`、`libc++.so`、`libselinux.so`、`libandroid_runtime.so`）映射段中 `Private_Dirty > 0` 则判为可疑注入（正常代码段不应有 Private_Dirty）；显式针对 libart/libc/libselinux/libandroid_runtime 提高对 Frida inline hook 的命中率（frida-server 全局 hook zygote 时必改以上库）；2) **VMap 检测**：扫描 `/proc/self/maps`，对匿名可执行映射（`r-x` + `anon`）读取内存，搜索 `zygisk_module_entry`、`libzygisk.so`、`ZygiskModule`、`zygisk` 等特征字符串；3) **Pagemap bit 61 (soft-dirty) 检测**：读取 `/proc/self/pagemap`，检查 libc 中 `fork`/`vfork`/`signal` 函数所在页的 bit 61（soft-dirty）是否置位；Frida inline hook 触发 COW 后该位永久置位，内核管理无法伪造。使用 syscall（`my_open`/`my_read`/`my_lseek`）绕过 libc。 |
+| **实现** | 1) **Smaps 检测**：读取 `/proc/self/smaps`，解析可执行段（`r-xp`/`r-x`），若 `.so` 或关键系统库（`libart.so`、`libc.so`、`libc++.so`、`libselinux.so`、`libandroid_runtime.so`）映射段中 `Private_Dirty > 0` 则判为可疑注入（正常代码段不应有 Private_Dirty）；显式针对 libart/libc/libselinux/libandroid_runtime 提高对 Frida inline hook 的命中率（frida-server 全局 hook zygote 时必改以上库）；2) **VMap 检测**：扫描 `/proc/self/maps`，对匿名可执行映射（`r-x` + `anon`）读取内存，搜索 `zygisk_module_entry`、`libzygisk.so`、`ZygiskModule`、`zygisk` 等特征字符串；3) **Pagemap bit 55 (soft-dirty) 检测**：读取 `/proc/self/pagemap`，检查 libc 中 `fork`/`vfork`/`signal` 函数所在页的 bit 55（soft-dirty）是否置位；Frida inline hook 触发 COW 后该位永久置位，内核管理无法伪造。注意：bit 61 为 file-page 标识，libc 为文件映射故恒为 1，误用会导致误报。使用 syscall（`my_open`/`my_read`/`my_lseek`）绕过 libc。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
 | **设计说明** | 参考 Android-App-Memory-Analysis、JingMatrixDemo、2025 年 meta；Private_Dirty + Pagemap soft-dirty 为「永久性指纹」几乎无法绕过；JIT 可产生 Private_Dirty，需结合白名单与阈值；多种方法联合降低误报 |
 
@@ -183,10 +194,10 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 | 属性     | 说明 |
 |----------|------|
-| **目的** | 检测开发者选项、USB/WiFi ADB 是否开启，以及 5555 端口是否开放 |
-| **实现层** | Java + Native |
-| **实现** | 1) Java：`Settings.Secure.development_settings_enabled`（开发者选项）、`Settings.Global.adb_enabled`、`adb_wifi_enabled`；2) Native：syscall 检查 `127.0.0.1:5555` 是否可连接 |
-| **状态** | 任意一项开启 → `WARNING`（仅提示不扣分：`warnOnly=true`，部分设备需开启 ADB 做开发） |
+| **目的** | 检测开发者选项、USB/WiFi ADB 是否开启，以及 ADB 端口、adbd 进程、sysfs 状态 |
+| **实现层** | Java + Native（多通道，降低 API hook 导致漏检） |
+| **实现** | **Native（syscall）**：① 端口 syscall connect 检测 5555、5556、5557、5558；② 解析 `/proc/net/tcp` 搜索 ADB 端口十六进制（15B3/15B4/15B5/15B6）；③ 扫描 `/proc/*/comm` 检测 adbd 进程；④ 读取 `/sys/class/android_usb/android0/state` 若为 CONFIGURED/CONNECTED；**Java Settings API**：`development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled`；**Java exec 替代路径**：`getprop init.svc.adbd`、`settings get global adb_enabled`、`adb_wifi_enabled`、`settings get secure development_settings_enabled`，绕过 ContentResolver hook |
+| **状态** | 任一通道发现指标 → `WARNING`（仅提示不扣分：`warnOnly=true`，部分设备需开启 ADB 做开发） |
 
 ### 3.9 Multi-instance（多开）
 
@@ -304,7 +315,7 @@ App 启动
 DetectionManager 初始化
     ↓
 并行执行 {
-    DebugDetectionManager.runAllDetections()   ← 7 项
+    DebugDetectionManager.runAllDetections()   ← 8 项
     EnvDetectionManager.runAllDetections()     ← 10 项
 }
     ↓
@@ -338,6 +349,7 @@ UI 展示（OverviewFragment）
 | detectFridaThreads | `nativeDetectFridaThreads` | `thread_detector` |
 | detectFridaPorts | `nativeGetFridaPortScanResult` | `port_scanner` |
 | detectMemorySignatures | `nativeGetMemorySignatureResult` | `memory_scanner` |
+| detectMapsViaExec      | —（Java exec）                   | 读 `/proc/pid/maps` 二次检测 |
 | detectNamedPipes | — | Java 读 `/proc/self/net/unix` |
 | detectPtraceStatus | — | Java 读 `/proc/self/status` (TracerPid) |
 | detectDebuggerAttached | — | Java `Debug.isDebuggerConnected()` |
@@ -349,11 +361,11 @@ UI 展示（OverviewFragment）
 |--------------------|------------|--------------------|
 | detectBootloader | `nativeDetectBootloader` + `KeyAttestationHelper.runAttestationSync()` | `env_detect_bootloader` 与 Java Key Attestation |
 | detectRoot | `nativeDetectMagisk` | `env_detect_magisk` |
-| detectZygiskInjection | `nativeDetectZygiskInjection` | `env_detect_zygisk_injection`（Smaps + VMap + Pagemap bit 61） |
+| detectZygiskInjection | `nativeDetectZygiskInjection` | `env_detect_zygisk_injection`（Smaps + VMap + Pagemap bit 55） |
 | detectXposedModules（Dangerous Apps） | `nativeVerifyXposedModules` | Java 双路径获取应用列表 + Native 校验 APK（assets/xposed_init）、modules.list |
 | detectSuspiciousFiles | `nativeDetectSuspiciousFiles` | `env_detect_suspicious_files` |
 | detectEmulator | `nativeDetectEmulator` | `env_detect_emulator_files` |
-| detectAdbEnhanced | `nativeCheckPort(5555)` | `env_check_port_open`；Java 检查 `development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled` |
+| detectAdbEnhanced | `nativeDetectAdb()` | `env_detect_adb`（端口/net/tcp/adbd/sysfs）；Java Settings API + exec 替代路径（getprop/settings） |
 | checkProcessStatus (Multi-instance) | — | Java 包名/FilesDir |
 | detectContainer | `nativeCheckCgroup` | `env_detect_cgroup` |
 
@@ -374,6 +386,7 @@ UI 展示（OverviewFragment）
 | Container (Native cgroup) | ⭐⭐⭐ | 需伪造 cgroup 环境 |
 | Debugger Attached | ⭐⭐ | 单 API 调用，易被 Hook |
 | Ptrace | ⭐⭐ | 读取 /proc，可被 Hook |
+| ADB Debug | ⭐⭐⭐⭐ | Native syscall 多通道 + exec 替代路径，需同时 hook 多层才能绕过 |
 
 ---
 
@@ -381,7 +394,7 @@ UI 展示（OverviewFragment）
 
 | 目的             | 对应检测项 |
 |------------------|------------|
-| 防 Frida 注入    | Frida Threads、Frida Ports、Memory Signatures、Named Pipes、Suspicious Files、Zygisk Injection（Smaps Private_Dirty + Pagemap soft-dirty） |
+| 防 Frida 注入    | Frida Threads、Frida Ports、Memory Signatures、Maps 二次检测 (Java exec)、Named Pipes、Suspicious Files、Zygisk Injection（Smaps Private_Dirty + Pagemap soft-dirty） |
 | 防调试器附加     | Ptrace、Debugger Attached |
 | 防 Root/Hook     | Magisk/Root、Zygisk Injection、Xposed（含 LSPosed 路径/env）、Dangerous Apps、Bootloader（含 Key Attestation） |
 | 设备完整性       | Bootloader（含 Key Attestation）、Kernel Patch |
@@ -407,6 +420,7 @@ UI 展示（OverviewFragment）
 | 内存扫描     | `app/src/main/cpp/detector/memory_scanner.cpp` |
 | Hook 检测（内联/PLT/GOT/LR 寄存器） | `app/src/main/cpp/detector/hook_detector.cpp` |
 | Xposed 路径/fd | `app/src/main/cpp/detector/xposed_detector.cpp` |
+| 调试/进程状态（Legacy，MainActivity JNI） | `app/src/main/cpp/detector/anti_debug.cpp`（TracerPid、debug_flag、LD_PRELOAD；主 17 项流程中 Ptrace/Debugger 由 Java 实现） |
 | 环境检测 C++（Magisk/Bootloader/Zygisk/模拟器等） | `app/src/main/cpp/detector/env_detector.cpp` |
 | Syscall 工具 | `app/src/main/cpp/utils/syscall_utils.cpp` |
 | Native 构建（libantidebug + libenvdetect） | `app/src/main/cpp/CMakeLists.txt` |
@@ -506,9 +520,9 @@ int get_frida_thread_details(char (*details)[256], int max_details) {
 }
 ```
 
-### 12.4 Native 层：内存签名扫描（/proc/self/maps）
+### 12.4 内存映射 maps 扫描（双通道）
 
-**文件**：`app/src/main/cpp/detector/memory_scanner.cpp`
+**Native（主通道）**：`app/src/main/cpp/detector/memory_scanner.cpp`
 
 - 使用 **syscall** `my_open`/`my_read` 读 `/proc/self/maps`，逐行用 `my_strcasestr` 匹配签名。
 - **增强**：匿名可执行内存（`check_anon_exec_memory`）：解析 maps 行，识别匿名路径（排除 [vdso]/[vvar]/[stack]/[heap]）+ 可执行权限 + 大小 ≥128KB，最多报告 2 条，用于发现 LSPosed 等隐藏 so 后仍保留的可执行代码。
@@ -521,6 +535,10 @@ for (int j = 0; FRIDA_SIGNATURES[j] != nullptr; j++) {
 // 2) 匿名可执行内存（LSPosed 隐藏 so 时仍保留可执行权限）
 check_anon_exec_memory(line, s_findings, MAX_MEMORY_FINDINGS, &s_finding_count, &anon_exec_count);
 ```
+
+**Java（二次检测）**：`app/src/main/java/anti/rusda/detector/DebugDetectionManager.java` — `detectMapsViaExec()`
+
+- 通过 `Runtime.getRuntime().exec("cat /proc/" + Process.myPid() + "/maps")` 读取 maps，`BufferedReader` 逐行与 `MAPS_SUSPICIOUS_SIGNATURES` 做不区分大小写匹配，与 Native 签名列表一致，形成双通道检测。
 
 ### 12.5 Native 层：Frida 端口与 frida-server 进程
 
@@ -552,7 +570,7 @@ bool detect_frida_ports(void) {
 
 **文件**：`app/src/main/cpp/detector/env_detector.cpp`
 
-- **Zygisk/Frida 注入**：① Smaps：`my_open`/`my_read` 读 `/proc/self/smaps`，r-xp 段中 `Private_Dirty > 0` 且为关键库（libart、libc、libselinux、libandroid_runtime）→ 可疑；② VMap：匿名可执行映射搜 `zygisk` 等特征；③ **Pagemap**：`my_open`/`my_lseek`/`my_read` 读 `/proc/self/pagemap`，检查 libc 中 `fork`/`vfork`/`signal` 所在页的 bit 61（soft-dirty），置位表示 COW 曾发生（Frida 指纹）。
+- **Zygisk/Frida 注入**：① Smaps：`my_open`/`my_read` 读 `/proc/self/smaps`，r-xp 段中 `Private_Dirty > 0` 且为关键库（libart、libc、libselinux、libandroid_runtime）→ 可疑；② VMap：匿名可执行映射搜 `zygisk` 等特征；③ **Pagemap**：`my_open`/`my_lseek`/`my_read` 读 `/proc/self/pagemap`，检查 libc 中 `fork`/`vfork`/`signal` 所在页的 bit 55（soft-dirty），置位表示 COW 曾发生（Frida 指纹）。
 - **Magisk**：`my_access`/`file_exists` 检测路径存在性，避免直接用 libc open。
 
 ```cpp
@@ -573,6 +591,7 @@ int env_detect_magisk(char (*details)[256], int max_details) {
 
 - **可疑文件**：扫描 `/data/local/tmp` 下含 `frida-server` 的文件名，以及固定路径 `/data/adb/magisk`、`/data/adb/lspd` 等（见 `SUSPICIOUS_ADB_PATHS`）。
 - **容器/虚拟化**：`my_open`/`my_read` 读 `/proc/1/cgroup`，用 `my_strstr` 匹配 `lxc`、`docker`、`kubepods`。
+- **ADB 检测**（`env_detect_adb`）：① syscall connect 检测端口 5555–5558；② 解析 `/proc/net/tcp` 搜索 15B3/15B4/15B5/15B6；③ 扫描 `/proc/*/comm` 检测 adbd 进程；④ 读取 `/sys/class/android_usb/android0/state` 若为 CONFIGURED/CONNECTED。
 
 ### 12.7 Native 层：Bootloader 状态（系统属性）
 
@@ -650,7 +669,7 @@ JNIEXPORT jobjectArray JNICALL Java_..._nativeDetectMagisk(...) {
 **文件**：`app/src/main/java/anti/rusda/detector/EnvDetectionManager.java`
 
 - `runAllDetections()` 依次调用 10 项环境检测；Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
-- **ADB Debug** 检测：① `Settings.Secure.development_settings_enabled`（开发者选项）；② `Settings.Global.adb_enabled`、`adb_wifi_enabled`；③ Native `nativeCheckPort(5555)`。任一项开启 → WARNING。
+- **ADB Debug** 检测（多通道抗 hook）：① **Native** `nativeDetectAdb()`：syscall 端口 5555–5558、`/proc/net/tcp`、adbd 进程、sysfs USB 状态；② **Java Settings API**：`development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled`；③ **Java exec**：`getprop init.svc.adbd`、`settings get global adb_enabled` 等，绕过 ContentResolver hook。任一项通道发现 → WARNING。
 - 使用 `warnOnly=true`，WARNING 时仍得满分，仅 UI 提示。
 
 ```java

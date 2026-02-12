@@ -58,6 +58,8 @@ public class EnvDetectionManager {
     private static native String[] nativeDetectZygiskInjection();
     private static native String[] nativeDetectEmulator(String hardware, String product, String device, String brand);
     private static native boolean nativeCheckPort(int port);
+    /** 多通道 Native ADB 检测（syscall）：端口、net/tcp、adbd 进程、sysfs；返回 String[] { status, summary, ... } */
+    private static native String[] nativeDetectAdb();
     private static native String[] nativeCheckCgroup();
     /** Verify APKs via syscall (assets/xposed_init) + modules.list; returns package names of Xposed modules */
     private static native String[] nativeVerifyXposedModules(String[] apkPaths, String[] packageNames);
@@ -408,33 +410,88 @@ public class EnvDetectionManager {
         return new DetectionResult("Kernel Patch", summary, status, 10, details, true);  // warnOnly：过期仅警告不扣分
     }
 
+    /**
+     * exec 执行命令并读取首行输出，绕过 ContentResolver/Settings API hook。
+     * 用于 getprop、settings get 等替代路径。
+     */
+    private static String execReadFirstLine(String[] cmd) {
+        try {
+            java.lang.Process p = Runtime.getRuntime().exec(cmd);
+            try (BufferedReader r = new BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line = r.readLine();
+                p.waitFor();
+                return line != null ? line.trim() : "";
+            }
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     private DetectionResult detectAdbEnhanced() {
         List<String> details = new ArrayList<>();
         int status = DetectionResult.STATUS_NORMAL;
-        if (context != null) {
-            var resolver = context.getContentResolver();
-            /* 开发者选项：Settings.Secure.development_settings_enabled（1=开启） */
-            int devOptions = Settings.Secure.getInt(resolver, "development_settings_enabled", 0);
-            int usbAdb = Settings.Global.getInt(resolver, "adb_enabled", 0);
-            /* adb_wifi_enabled returns 0 if key not present (API 30+) */
-            int wifiAdb = Settings.Global.getInt(resolver, "adb_wifi_enabled", 0);
-            boolean port5555Open = nativeCheckPort(5555);
 
-            details.add("Developer options: " + (devOptions == 1 ? "enabled" : "disabled"));
-            details.add("USB ADB: " + (usbAdb == 1 ? "enabled" : "disabled"));
-            details.add("WiFi ADB: " + (wifiAdb == 1 ? "enabled" : "disabled"));
-            details.add("Port 5555: " + (port5555Open ? "open" : "closed"));
-
-            if (devOptions == 1 || usbAdb == 1 || wifiAdb == 1 || port5555Open) {
-                status = DetectionResult.STATUS_WARNING;
-            }
-        } else {
-            details.add("No context for ADB check");
+        /* 1. Native 多通道检测（syscall，抗 hook） */
+        String[] nativeRaw = nativeDetectAdb();
+        if (nativeRaw != null && nativeRaw.length >= 2) {
+            try {
+                int natStatus = Integer.parseInt(nativeRaw[0]);
+                if (natStatus == 1) status = DetectionResult.STATUS_WARNING;
+                details.add("═══ Native (syscall) ═══");
+                if (nativeRaw.length > 2) {
+                    for (int i = 2; i < nativeRaw.length; i++) {
+                        if (nativeRaw[i] != null && !nativeRaw[i].isEmpty()) {
+                            details.add(nativeRaw[i]);
+                        }
+                    }
+                } else {
+                    details.add("No ADB indicators (port/net/tcp/adbd/sysfs)");
+                }
+            } catch (NumberFormatException ignored) { }
         }
+
+        /* 2. Java Settings API（易被 hook，保留作兼容） */
+        if (context != null) {
+            details.add("═══ Settings API ═══");
+            try {
+                var resolver = context.getContentResolver();
+                int devOptions = Settings.Secure.getInt(resolver, "development_settings_enabled", 0);
+                int usbAdb = Settings.Global.getInt(resolver, "adb_enabled", 0);
+                int wifiAdb = Settings.Global.getInt(resolver, "adb_wifi_enabled", 0);
+
+                details.add("Developer options: " + (devOptions == 1 ? "enabled" : "disabled"));
+                details.add("USB ADB: " + (usbAdb == 1 ? "enabled" : "disabled"));
+                details.add("WiFi ADB: " + (wifiAdb == 1 ? "enabled" : "disabled"));
+
+                if (devOptions == 1 || usbAdb == 1 || wifiAdb == 1) status = DetectionResult.STATUS_WARNING;
+            } catch (SecurityException ignored) {
+                details.add("Settings restricted");
+            }
+        }
+
+        /* 3. exec 替代路径（绕过 ContentResolver hook；使用完整路径以提高可用性） */
+        details.add("═══ Exec fallback ═══");
+        String adbdSvc = execReadFirstLine(new String[]{"/system/bin/getprop", "init.svc.adbd"});
+        String adbEnabled = execReadFirstLine(new String[]{"/system/bin/settings", "get", "global", "adb_enabled"});
+        String adbWifi = execReadFirstLine(new String[]{"/system/bin/settings", "get", "global", "adb_wifi_enabled"});
+        String devOpts = execReadFirstLine(new String[]{"/system/bin/settings", "get", "secure", "development_settings_enabled"});
+
+        boolean adbdRunning = "running".equalsIgnoreCase(adbdSvc);
+        boolean execAdbOn = "1".equals(adbEnabled);
+        boolean execWifiOn = "1".equals(adbWifi);
+        boolean execDevOn = "1".equals(devOpts);
+
+        details.add("getprop init.svc.adbd: " + (adbdSvc.isEmpty() ? "N/A" : adbdSvc));
+        details.add("settings adb_enabled: " + (adbEnabled.isEmpty() ? "N/A" : adbEnabled));
+        details.add("settings adb_wifi_enabled: " + (adbWifi.isEmpty() ? "N/A" : adbWifi));
+        details.add("settings development_settings_enabled: " + (devOpts.isEmpty() ? "N/A" : devOpts));
+
+        if (adbdRunning || execAdbOn || execWifiOn || execDevOn) status = DetectionResult.STATUS_WARNING;
+
         String summary = status == DetectionResult.STATUS_NORMAL
                 ? "ADB debugging disabled, developer options off"
-                : "Developer options or ADB enabled, or port 5555 open";
-        /* warnOnly=true: 只做警告不扣分，部分设备需开启 ADB 做开发调试 */
+                : "Developer options or ADB enabled (multi-channel)";
         return new DetectionResult("ADB Debug", summary, status, 5, details, true);
     }
 

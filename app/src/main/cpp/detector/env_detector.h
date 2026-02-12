@@ -30,6 +30,10 @@ int env_detect_emulator_files(const char *hardware, const char *product,
 // Check if a port is open on 127.0.0.1 (for ADB 5555 etc.), uses syscall
 bool env_check_port_open(int port);
 
+// ADB/developer mode detection: multi-channel (syscall), returns count, fills details
+// Ports 5555-5558, /proc/net/tcp, adbd process, /sys/class/android_usb
+int env_detect_adb(char (*details)[256], int max_details);
+
 // Container/cgroup check - returns count, DANGER when > 0
 int env_detect_cgroup(char (*details)[256], int max_details);
 

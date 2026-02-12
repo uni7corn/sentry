@@ -1,4 +1,4 @@
-# AntiFrida ProGuard Rules
+# SentryTag ProGuard Rules
 
 # Keep native methods
 -keepclasseswithmembernames class * {
