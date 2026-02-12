@@ -80,17 +80,40 @@ public class EnvDetectionManager {
         int statusNat = DetectionResult.STATUS_NORMAL;
         List<String> details = new ArrayList<>();
         details.add("═══ AVB (System Properties) ═══");
+        boolean nativeOemEnabled = false;
         if (nativeRaw != null && nativeRaw.length >= 2) {
             try {
                 statusNat = Integer.parseInt(nativeRaw[0]);
             } catch (NumberFormatException ignored) { }
             if (nativeRaw.length > 2) {
                 details.addAll(Arrays.asList(Arrays.copyOfRange(nativeRaw, 2, nativeRaw.length)));
+                for (int i = 2; i < nativeRaw.length; i++) {
+                    if (nativeRaw[i] != null && nativeRaw[i].contains("OEM unlock")) {
+                        nativeOemEnabled = true;
+                        break;
+                    }
+                }
             } else {
                 details.add("verifiedbootstate, flash.locked, veritymode, avb_version, etc.");
             }
         } else {
             details.add("Native bootloader check unavailable");
+        }
+
+        /* 1.5 OEM 解锁交叉验证：Native sys.oem_unlock_allowed vs Java Settings.Global.oem_unlock_enabled */
+        if (context != null) {
+            details.add("═══ OEM Unlock Cross-Verify ═══");
+            int oemUnlockJava = 0;
+            try {
+                oemUnlockJava = Settings.Global.getInt(context.getContentResolver(), "oem_unlock_enabled", 0);
+            } catch (SecurityException ignored) { }
+            boolean javaOemEnabled = (oemUnlockJava == 1);
+            details.add("Settings.Global.oem_unlock_enabled: " + (javaOemEnabled ? "1 (enabled)" : "0 (disabled)"));
+            details.add("Native sys.oem_unlock_allowed: " + (nativeOemEnabled ? "1 (enabled)" : "0 (disabled)"));
+            if (nativeOemEnabled != javaOemEnabled) {
+                details.add("OEM unlock cross-verify mismatch (possible hook or OEM-specific semantics)");
+                if (statusNat < DetectionResult.STATUS_WARNING) statusNat = DetectionResult.STATUS_WARNING;
+            }
         }
 
         /* 2. Key Attestation：TEE RootOfTrust（deviceLocked、verifiedBootState、verifiedBootKey、verifiedBootHash） */
@@ -283,24 +306,27 @@ public class EnvDetectionManager {
         int status = DetectionResult.STATUS_NORMAL;
         if (context != null) {
             var resolver = context.getContentResolver();
+            /* 开发者选项：Settings.Secure.development_settings_enabled（1=开启） */
+            int devOptions = Settings.Secure.getInt(resolver, "development_settings_enabled", 0);
             int usbAdb = Settings.Global.getInt(resolver, "adb_enabled", 0);
             /* adb_wifi_enabled returns 0 if key not present (API 30+) */
             int wifiAdb = Settings.Global.getInt(resolver, "adb_wifi_enabled", 0);
             boolean port5555Open = nativeCheckPort(5555);
 
+            details.add("Developer options: " + (devOptions == 1 ? "enabled" : "disabled"));
             details.add("USB ADB: " + (usbAdb == 1 ? "enabled" : "disabled"));
             details.add("WiFi ADB: " + (wifiAdb == 1 ? "enabled" : "disabled"));
             details.add("Port 5555: " + (port5555Open ? "open" : "closed"));
 
-            if (usbAdb == 1 || wifiAdb == 1 || port5555Open) {
+            if (devOptions == 1 || usbAdb == 1 || wifiAdb == 1 || port5555Open) {
                 status = DetectionResult.STATUS_WARNING;
             }
         } else {
             details.add("No context for ADB check");
         }
         String summary = status == DetectionResult.STATUS_NORMAL
-                ? "ADB debugging disabled"
-                : "ADB debugging enabled or port 5555 open";
+                ? "ADB debugging disabled, developer options off"
+                : "Developer options or ADB enabled, or port 5555 open";
         /* warnOnly=true: 只做警告不扣分，部分设备需开启 ADB 做开发调试 */
         return new DetectionResult("ADB Debug", summary, status, 5, details, true);
     }

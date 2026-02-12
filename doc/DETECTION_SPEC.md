@@ -116,11 +116,11 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Bootloader 锁定状态与启动验证配置，**包含** TEE Key Attestation 的 RootOfTrust（verifiedBootKey、deviceLocked、verifiedBootState、verifiedBootHash） |
 | **实现层** | Native（`env_detector.cpp`）+ Java（`KeyAttestationHelper`） |
-| **实现** | 1) **Native**：读取 `ro.boot.verifiedbootstate`、`ro.boot.flash.locked`、`ro.boot.veritymode`、`ro.boot.vbmeta.device_state`、`sys.oem_unlock_allowed` 等；`orange`、`vbmeta.device_state=unlocked`、`flash.locked=0`、`veritymode=disabled` 判为 DANGER；`yellow`（自定义密钥）、`oem_unlock_allowed=1` 判为 WARNING；与 `/proc/cmdline` 交叉验证以检测 prop hook。2) **Key Attestation**：证书链完整性校验、RootOfTrust 解析；`verifiedBootKey` 全零（非模拟器）、`deviceLocked=false`、`verifiedBootState=Unverified(2)` 或 `Failed(3)` 判为 DANGER；SelfSigned(1)、启动 &lt;1 分钟判为 WARNING；API&lt;28 不可检测时返回 NORMAL。 |
+| **实现** | 1) **Native**：读取 `ro.boot.verifiedbootstate`、`ro.boot.flash.locked`、`ro.boot.veritymode`、`ro.boot.vbmeta.device_state`、`sys.oem_unlock_allowed` 等；`orange`、`vbmeta.device_state=unlocked`、`flash.locked=0`、`veritymode=disabled` 判为 DANGER；`yellow`（自定义密钥）、`oem_unlock_allowed=1` 判为 WARNING；与 `/proc/cmdline` 交叉验证以检测 prop hook。2) **OEM 解锁交叉验证**（Java）：读取 `Settings.Global.oem_unlock_enabled`，与 Native 的 `sys.oem_unlock_allowed` 结果对比；二者不一致时判为 WARNING（可能 hook 或 OEM 语义差异）。3) **Key Attestation**：证书链完整性校验、RootOfTrust 解析；`verifiedBootKey` 全零（非模拟器）、`deviceLocked=false`、`verifiedBootState=Unverified(2)` 或 `Failed(3)` 判为 DANGER；SelfSigned(1)、启动 &lt;1 分钟判为 WARNING；API&lt;28 不可检测时返回 NORMAL。 |
 | **状态** | Native 或 Key Attestation 任一项 DANGER → `DANGER`；`warranty_bit=1` 或 AVB 版本缺失 → `WARNING`；verifiedBootKey 全零 / deviceLocked=false / Unverified 或 Failed → `DANGER`；SelfSigned → `WARNING`；Verified → `NORMAL`；API&lt;28 或 attestation 不可用 → `WARNING`；RootOfTrust 解析失败 → `NORMAL`（避免误报） |
 | **误报控制** | RootOfTrust 结构不被当前解析器识别时视为 NORMAL |
 | **权重** | `maxScore = 15` |
-| **详情展示** | 系统属性（verifiedbootstate、flash.locked、veritymode 等）+ Key Attestation 的 **Device State**（deviceLocked、verifiedBootState、verifiedBootKey、verifiedBootHash）与 **Security Impact**，与 Hunter 等工具检测一致 |
+| **详情展示** | 系统属性（verifiedbootstate、flash.locked、veritymode 等）+ **OEM Unlock Cross-Verify**（Settings.Global vs Native）+ Key Attestation 的 **Device State**（deviceLocked、verifiedBootState、verifiedBootKey、verifiedBootHash）与 **Security Impact**，与 Hunter 等工具检测一致 |
 
 ### 3.2 Magisk / Root
 
@@ -171,9 +171,9 @@ Sentry 提供 **16 项** 安全检测，分为两类：
 
 | 属性     | 说明 |
 |----------|------|
-| **目的** | 检测 USB/WiFi ADB 是否开启，以及 5555 端口是否开放 |
+| **目的** | 检测开发者选项、USB/WiFi ADB 是否开启，以及 5555 端口是否开放 |
 | **实现层** | Java + Native |
-| **实现** | 1) Java：`Settings.Global.adb_enabled`、`adb_wifi_enabled`；2) Native：syscall 检查 `127.0.0.1:5555` 是否可连接 |
+| **实现** | 1) Java：`Settings.Secure.development_settings_enabled`（开发者选项）、`Settings.Global.adb_enabled`、`adb_wifi_enabled`；2) Native：syscall 检查 `127.0.0.1:5555` 是否可连接 |
 | **状态** | 任意一项开启 → `WARNING`（仅提示不扣分：`warnOnly=true`，部分设备需开启 ADB 做开发） |
 
 ### 3.8 Multi-instance（多开）
@@ -332,7 +332,7 @@ UI 展示（OverviewFragment）
 | detectLsposed | `nativeDetectLsposed` | `env_detect_lsposed` |
 | detectSuspiciousFiles | `nativeDetectSuspiciousFiles` | `env_detect_suspicious_files` |
 | detectEmulator | `nativeDetectEmulator` | `env_detect_emulator_files` |
-| detectAdbEnhanced | `nativeCheckPort(5555)` | `env_check_port_open` |
+| detectAdbEnhanced | `nativeCheckPort(5555)` | `env_check_port_open`；Java 检查 `development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled` |
 | checkProcessStatus (Multi-instance) | — | Java 包名/FilesDir |
 | detectContainer | `nativeCheckCgroup` | `env_detect_cgroup` |
 
@@ -612,7 +612,7 @@ JNIEXPORT jobjectArray JNICALL Java_..._nativeDetectMagisk(...) {
 
 **文件**：`app/src/main/java/anti/rusda/detector/EnvDetectionManager.java` 的 `detectBootloader()`、`KeyAttestationHelper.java`
 
-- Bootloader 检测合并 Native 系统属性 + Key Attestation。`detectBootloader()` 调用 `nativeDetectBootloader()` 与 `KeyAttestationHelper.runAttestationSync()`，取最严重状态合并展示。
+- Bootloader 检测合并 Native 系统属性 + **OEM 解锁交叉验证** + Key Attestation。`detectBootloader()` 调用 `nativeDetectBootloader()`、进行 OEM 交叉验证（`Settings.Global.oem_unlock_enabled` 与 Native `sys.oem_unlock_allowed` 对比，不一致则 WARNING）、再调用 `KeyAttestationHelper.runAttestationSync()`，取最严重状态合并展示。
 - Key Attestation：API 28+ 在 AndroidKeyStore 中生成带 `setAttestationChallenge` 的密钥，取证书链，解析扩展 OID `1.3.6.1.4.1.11129.2.1.17` 中的 ROOT_OF_TRUST。
 - 判危：`verifiedBootKey` 全零、`deviceLocked=false`、`verifiedBootState=Unverified(2)` 或 `Failed(3)`；SelfSigned(1) 为 WARNING。解析失败或格式不识别时返回 NORMAL 避免误报。
 
@@ -642,7 +642,8 @@ JNIEXPORT jobjectArray JNICALL Java_..._nativeDetectMagisk(...) {
 **文件**：`app/src/main/java/anti/rusda/detector/EnvDetectionManager.java`
 
 - `runAllDetections()` 依次调用 9 项环境检测；Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
-- **ADB Debug** 使用 `warnOnly=true`，WARNING 时仍得满分，仅 UI 提示。
+- **ADB Debug** 检测：① `Settings.Secure.development_settings_enabled`（开发者选项）；② `Settings.Global.adb_enabled`、`adb_wifi_enabled`；③ Native `nativeCheckPort(5555)`。任一项开启 → WARNING。
+- 使用 `warnOnly=true`，WARNING 时仍得满分，仅 UI 提示。
 
 ```java
 return new DetectionResult("ADB Debug", summary, status, 5, details, true);  // warnOnly=true
