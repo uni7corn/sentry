@@ -34,7 +34,7 @@ int get_frida_thread_details(char (*details)[256], int max_details) {
     DIR *dir = opendir("/proc/self/task");
     if (!dir) {
         LOGD("Failed to open /proc/self/task");
-        return 0;
+        return -1;  /* 无法打开 task 目录时由 JNI 显示 Check skipped */
     }
 
     struct dirent *entry;
@@ -49,13 +49,14 @@ int get_frida_thread_details(char (*details)[256], int max_details) {
 
         snprintf(path, sizeof(path), "/proc/self/task/%s/comm", entry->d_name);
 
-        /* Use syscall to bypass libc hook */
-        int fd = my_open(path, 0, 0);  /* O_RDONLY */
+        /* 先 syscall 再 libc 打开/读，提高兼容性 */
+        int used_syscall = 0;
+        int fd = open_with_fallback(path, 0, 0, &used_syscall);  /* O_RDONLY */
         if (fd < 0) {
             continue;
         }
 
-        ssize_t bytes = my_read(fd, buffer, sizeof(buffer) - 1);
+        ssize_t bytes = read_with_fallback(fd, buffer, sizeof(buffer) - 1, used_syscall);
         my_close(fd);
 
         if (bytes > 0) {

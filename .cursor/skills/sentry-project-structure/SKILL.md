@@ -5,7 +5,7 @@ description: Documents the Sentry Android security detection app structure (Java
 
 # Sentry 项目结构
 
-Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。调试检测现为 **8 项**，含 **Maps 二次检测 (Java exec)**（`Runtime.exec("cat /proc/pid/maps")` 与 Native syscall 双通道）、**Dirty Page / Memory Injection**（脏页/内存注入：Smaps Private_Dirty + VMap + Pagemap bit 55，实现位于 libenvdetect，由 DebugDetectionManager 加载 envdetect 后调用）。环境检测含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。**LSPosed Hook** 已合并至调试检测的 Xposed / Hook Framework。
+Android 安全检测应用，Java + Native (C++) 双引擎，包名 `anti.rusda`。**两个 Native 库**：`libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）。主界面为 **3 个 Tab**：概览（设备信息+分数）、调试检测、环境检测。调试检测现为 **11 项**，含 **Maps 二次检测 (Java exec)**（`Runtime.exec("cat /proc/pid/maps")` 与 Native syscall 双通道）、**Dirty Page / Memory Injection**（脏页/内存注入：Smaps Private_Dirty + VMap + Pagemap bit 55，实现位于 libenvdetect，由 DebugDetectionManager 加载 envdetect 后调用）。环境检测现为 **10 项**，首项为 **App Signature**（防二次打包：当前 APK 签名 SHA-256 与 release 构建时注入的预期值在 Native 层比对，不通过则 `SentryApp.onCreate` 退出进程）；含 **Bootloader**（Native 系统属性 + Key Attestation TEE RootOfTrust）、**Dangerous Apps**（多渠道：meta-data、APK assets/xposed_init、modules.list，warnOnly）。**LSPosed Hook** 已合并至调试检测的 Xposed / Hook Framework。
 
 ## 目录树
 
@@ -25,8 +25,12 @@ sentry/
 │       │   │   ├── port_scanner.cpp/h
 │       │   │   ├── memory_scanner.cpp/h
 │       │   │   ├── hook_detector.cpp/h
+│       │   │   ├── so_integrity.cpp/h
+│       │   │   ├── art_method_detector.cpp/h
+│       │   │   ├── trap_detector.cpp/h
 │       │   │   ├── xposed_detector.cpp/h
 │       │   │   ├── anti_debug.cpp/h
+│       │   │   ├── signature_checker.cpp/h   # 应用签名校验（防二次打包）
 │       │   │   └── env_detector.cpp/h
 │       │   └── utils/
 │       │       └── syscall_utils.cpp/h
@@ -69,6 +73,7 @@ sentry/
 
 | 用途 | 路径 |
 |------|------|
+| 应用入口（启动时签名校验防二次打包） | `app/src/main/java/anti/rusda/SentryApp.java` |
 | 主界面 / Tab | `app/src/main/java/anti/rusda/MainActivity.java` |
 | 概览 Fragment | `app/src/main/java/anti/rusda/OverviewFragment.java` |
 | 调试/环境 Fragment | `app/src/main/java/anti/rusda/DebugFragment.java`, `EnvironmentFragment.java` |
@@ -89,7 +94,7 @@ sentry/
 
 - **命名空间/包名**: `anti.rusda`；**applicationId**: `anti.rusda`
 - **Native 库**: `libantidebug.so`（调试检测）、`libenvdetect.so`（环境检测）
-- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`（端口 + frida-server + Frida 进程 + **D-Bus AUTH 探测**）、`nativeGetMemorySignatureResult`、`nativeDetectXposedPaths`、`nativeDetectHook`、`nativeDetectZygiskInjection`（实现于 libenvdetect，Debug 加载 envdetect 后调用）等；环境 → `nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeDetectAdb`、`nativeCheckCgroup`、`nativeGetEnvVersion`；Bootloader 含 Native + Java `KeyAttestationHelper.runAttestationSync()`；**Dangerous Apps** 为 Java + Native 混合（`nativeVerifyXposedModules`：APK assets/xposed_init、modules.list）；**ADB Debug** 为 `nativeDetectAdb`（端口/net/tcp/adbd/sysfs）+ Java Settings + exec 替代路径；指纹 → `nativeGetProcVersion`
+- **JNI 约定**: 调试 → `nativeDetectFridaThreads`、`nativeGetFridaPortScanResult`、`nativeGetMemorySignatureResult`、`nativeDetectXposedPaths`、`nativeDetectHook`、**`nativeGetSoIntegrityResult`**（SO 代码段完整性）、**`nativeGetArtMethodCheckResult(Class)`**（ArtMethod 入口）、**`nativeGetTrapCheckResult`**（Hook 陷阱）、`nativeDetectZygiskInjection`（实现于 libenvdetect）等；环境 → **`nativeVerifyAppSignature(String)`**（应用签名校验，防二次打包）、`nativeDetectMagisk`、`nativeDetectBootloader`、`nativeDetectSuspiciousFiles`、`nativeDetectEmulator`、`nativeCheckPort`、`nativeDetectAdb`、`nativeCheckCgroup`、`nativeGetEnvVersion`；Bootloader 含 Native + Java `KeyAttestationHelper.runAttestationSync()`；**Dangerous Apps** 为 Java + Native 混合（`nativeVerifyXposedModules`：APK assets/xposed_init、modules.list）；**ADB Debug** 为 `nativeDetectAdb`（端口/net/tcp/adbd/sysfs）+ Java Settings + exec 替代路径；指纹 → `nativeGetProcVersion`
 - **检测状态**: `STATUS_NORMAL=0`(绿), `STATUS_WARNING=1`(橙), `STATUS_DANGER=2`(红)；每项有 **分数**（getEarnedScore/getMaxScore），概览页显示总分百分比
 - **ABI**: 仅 `arm64-v8a`；C++17；Android 15+ 使用 16KB 页面对齐
 - **导航**: 底部 TabLayout + ViewPager2 左右滑动，三页：概览、调试检测、环境检测
@@ -98,14 +103,14 @@ sentry/
 
 - **新增调试检测项**: `DebugDetectionManager.java` → 可选 `cpp/detector/` → `native-lib.cpp` JNI
 - **新增环境检测项**: `EnvDetectionManager.java` → `cpp/detector/env_detector.cpp` → `native-lib-env.cpp` JNI
-- **检测开发规范**：新增检测时参见 `.cursor/rules/detection-development.mdc`（Native 优先、syscall、评分与误报控制）
+- **检测开发规范**：新增检测时参见 `.cursor/rules/detection-development.mdc`（Native 优先、syscall、评分与误报控制）。**多通道与健壮性**：读 `/proc` 等文件优先用 `syscall_utils` 的 `open_with_fallback`/`read_with_fallback`（先 syscall 再 libc）；Java 读 proc 可用 `readProcFileWithFallback`（FileReader + exec），详见 `doc/DETECTION_SPEC.md` 5.6 节。
 - **新增 Activity/Fragment**: `AndroidManifest.xml`、对应 Java、布局 `res/layout/`
 - **新增资源/语言**: `res/values*/`、`values-<locale>/strings.xml`
 - **变更 Native 源**: `app/src/main/cpp/CMakeLists.txt` 的 `add_library` 列表
 
 ## 详细文档
 
-- **检测规范**（18 项检测说明、评分机制、实现层、误报控制、文件速查）：见 [doc/DETECTION_SPEC.md](../../../doc/DETECTION_SPEC.md)
+- **检测规范**（21 项检测说明、评分机制、实现层、误报控制、文件速查）：见 [doc/DETECTION_SPEC.md](../../../doc/DETECTION_SPEC.md)
 - 项目根目录暂无 `PROJECT_ARCHITECTURE.md` / `ARCHITECTURE_QUICKREF.md`，以本 SKILL 与 `doc/DETECTION_SPEC.md` 为准
 
 ## 何时更新本 Skill

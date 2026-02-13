@@ -2,6 +2,7 @@
 #include "utils/syscall_utils.h"
 #include <android/log.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <cstdint>
 #include <cstdlib>
 #include <sys/stat.h>
@@ -423,9 +424,10 @@ static const char *CRITICAL_SO_PATTERNS[] = {
     nullptr
 };
 
-/* Smaps 脏页检测白名单：这些 .so 允许有 Private_Dirty（系统/媒体栈正常行为），不报 DANGER */
+/* Smaps 脏页检测白名单：这些路径允许有 Private_Dirty，不报 DANGER */
 static const char *SMAPS_WHITELIST_SO[] = {
-    // "libstagefright.so",   /* /system/lib64/libstagefright.so 等，媒体解码常见少量脏页 */
+    "code_cache",           /* 调试模式 startup_agents 等，正常 */
+    "libstagefright.so",    /* 媒体解码常见少量脏页 */
     nullptr
 };
 
@@ -447,9 +449,10 @@ static bool is_suspicious_so_mapping(const char *mapping) {
     return false;
 }
 
-/* Smaps 检测：可执行段中 Private_Dirty > 0 的可疑注入（正常代码段不应有 Private_Dirty） */
+/* Smaps 检测：可执行段中 Private_Dirty > 0 的可疑注入（正常代码段不应有 Private_Dirty）。先 syscall 再 libc 打开/读。 */
 static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) {
-    int fd = my_open("/proc/self/smaps", 0, 0);  /* O_RDONLY */
+    int used_syscall = 0;
+    int fd = open_with_fallback("/proc/self/smaps", 0, 0, &used_syscall);
     if (fd < 0) return 0;
 
     LOGD("[smaps] scanning /proc/self/smaps for Private_Dirty in executable segments");
@@ -461,15 +464,15 @@ static int detect_private_dirty_in_smaps(char (*details)[256], int max_details) 
 
     char buf[512];
     ssize_t rd;
-    while ((rd = my_read(fd, buf, sizeof(buf))) > 0 && n < max_details) {
+    while ((rd = read_with_fallback(fd, buf, sizeof(buf), used_syscall)) > 0 && n < max_details) {
         for (ssize_t i = 0; i < rd && n < max_details; i++) {
             if (buf[i] == '\n' || line_pos >= sizeof(line) - 1) {
                 line[line_pos] = '\0';
                 line_pos = 0;
                 /* Logcat: 扫描 smaps 时打印每行内容（脏页检测） */
-                if (line[0] != '\0') {
-                    LOGD("[smaps] %s", line);
-                }
+                // if (line[0] != '\0') {
+                //     LOGD("[smaps] %s", line);
+                // }
                 /* 匹配内存映射行（权限包含 r-xp 或 r-x） */
                 if (my_strstr(line, "r-xp") != nullptr || my_strstr(line, "r-x") != nullptr) {
                     in_executable = true;
@@ -576,9 +579,10 @@ static int detect_pagemap_libc_hooks(char (*details)[256], int max_details) {
     return n;
 }
 
-/* VMap 检测：扫描 /proc/self/maps 中匿名可执行映射，搜索 Zygisk 特征字符串 */
+/* VMap 检测：扫描 /proc/self/maps 中匿名可执行映射，搜索 Zygisk 特征字符串。先 syscall 再 libc。 */
 static int scan_maps_for_zygisk_signatures(char (*details)[256], int max_details) {
-    int fd = my_open("/proc/self/maps", 0, 0);
+    int used_syscall = 0;
+    int fd = open_with_fallback("/proc/self/maps", 0, 0, &used_syscall);
     if (fd < 0) return 0;
 
     LOGD("[maps] scanning /proc/self/maps for Zygisk VMap signatures");
@@ -588,14 +592,14 @@ static int scan_maps_for_zygisk_signatures(char (*details)[256], int max_details
 
     char buf[256];
     ssize_t rd;
-    while ((rd = my_read(fd, buf, sizeof(buf))) > 0 && n < max_details) {
+    while ((rd = read_with_fallback(fd, buf, sizeof(buf), used_syscall)) > 0 && n < max_details) {
         for (ssize_t i = 0; i < rd && n < max_details; i++) {
             if (buf[i] == '\n' || line_pos >= sizeof(line) - 1) {
                 line[line_pos] = '\0';
                 line_pos = 0;
-                if (line[0] != '\0') {
-                    LOGD("[maps] %s", line);
-                }
+                // if (line[0] != '\0') {
+                //     LOGD("[maps] %s", line);
+                // }
                 /* 查找 r-x 且 anon 的映射 */
                 if (my_strstr(line, "r-x") != nullptr && my_strstr(line, "anon") != nullptr) {
                     unsigned long start = 0, end = 0;
@@ -956,11 +960,12 @@ int env_verify_xposed_modules(const char **apk_paths, const char **pkg_names, in
 
 int env_detect_cgroup(char (*details)[256], int max_details) {
     int n = 0;
-    int fd = my_open("/proc/1/cgroup", 0, 0);  /* O_RDONLY */
+    int used_syscall = 0;
+    int fd = open_with_fallback("/proc/1/cgroup", 0, 0, &used_syscall);  /* 先 syscall 再 libc */
     if (fd < 0) return 0;
 
     char buffer[4096];
-    ssize_t len = my_read(fd, buffer, sizeof(buffer) - 1);
+    ssize_t len = read_with_fallback(fd, buffer, sizeof(buffer) - 1, used_syscall);
     my_close(fd);
     if (len <= 0) return 0;
 

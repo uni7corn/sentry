@@ -9,6 +9,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     detector/memory_scanner.cpp
     detector/port_scanner.cpp
     detector/hook_detector.cpp
+    detector/so_integrity.cpp
+    detector/art_method_detector.cpp
+    detector/trap_detector.cpp
     detector/xposed_detector.cpp
     detector/anti_debug.cpp
     utils/syscall_utils.cpp
@@ -32,9 +35,14 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # ========== libenvdetect (环境检测 Native 库) ==========
+# 预期签名 SHA256（64 位十六进制）由 Gradle 在 release 构建时传入，Debug 为空则跳过校验
+if(NOT DEFINED EXPECTED_SIGNATURE_SHA256)
+    set(EXPECTED_SIGNATURE_SHA256 "")
+endif()
 add_library(envdetect SHARED
     native-lib-env.cpp
     detector/env_detector.cpp
+    detector/signature_checker.cpp
     utils/syscall_utils.cpp
 )
 target_include_directories(envdetect PRIVATE
@@ -42,6 +50,7 @@ target_include_directories(envdetect PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/detector
     ${CMAKE_CURRENT_SOURCE_DIR}/utils
 )
+target_compile_definitions(envdetect PRIVATE EXPECTED_SIGNATURE_SHA256="${EXPECTED_SIGNATURE_SHA256}")
 target_link_libraries(envdetect
     android
     log

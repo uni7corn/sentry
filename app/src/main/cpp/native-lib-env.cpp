@@ -2,6 +2,7 @@
 #include <cstring>
 #include <string>
 #include "detector/env_detector.h"
+#include "detector/signature_checker.h"
 
 #define MAX_DETAILS 16
 
@@ -164,6 +165,17 @@ Java_anti_rusda_detector_EnvDetectionManager_nativeVerifyXposedModules(JNIEnv *e
         env->SetObjectArrayElement(result, i, env->NewStringUTF(outPkgs[i]));
     }
     return result;
+}
+
+// App signature verification (anti-repackage): current SHA-256 hex from Java, compare with build-time expected
+JNIEXPORT jint JNICALL
+Java_anti_rusda_detector_EnvDetectionManager_nativeVerifyAppSignature(JNIEnv *env, jclass clazz, jstring sha256Hex) {
+    if (!sha256Hex) return 2;
+    const char *hex = env->GetStringUTFChars(sha256Hex, nullptr);
+    if (!hex) return 2;
+    int status = verify_app_signature(hex);
+    env->ReleaseStringUTFChars(sha256Hex, hex);
+    return status;
 }
 
 // Emulator: Java passes Build.*; native checks files + indicators

@@ -1,4 +1,5 @@
 #include "hook_detector.h"
+#include "memory_scanner.h"
 #include "utils/syscall_utils.h"
 #include <android/log.h>
 #include <dlfcn.h>
@@ -197,29 +198,28 @@ bool check_inline_hooks(void) {
     return hooked;
 }
 
-bool check_plt_hooks(void) {
-    // Check PLT/GOT for suspicious entries
-    // This requires parsing ELF headers which is complex
-    // For now, we'll use a simplified check
-
-    Dl_info info;
-    void *malloc_addr = dlsym(RTLD_DEFAULT, "malloc");
-
-    if (malloc_addr && dladdr(malloc_addr, &info)) {
-        LOGD("malloc found in: %s", info.dli_fname ? info.dli_fname : "unknown");
-
-        // If malloc is not in libc, it might be hooked（使用 my_strstr 降低 hook 影响）
-        if (info.dli_fname && my_strstr(info.dli_fname, "libc.so") == nullptr &&
-            my_strstr(info.dli_fname, "libc++.so") == nullptr) {
-            LOGD("malloc not in libc - possible PLT hook");
+/* GOT 指针逃逸检测：dlsym 返回的地址若落在可疑匿名 r-x 段，则疑为 Frida trampoline */
+static bool check_got_points_to_anon_trampoline(void) {
+    const char *syms[] = { "malloc", "free", "open", "read", "write", "connect", "socket", nullptr };
+    for (int i = 0; syms[i]; i++) {
+        void *addr = dlsym(RTLD_DEFAULT, syms[i]);
+        if (!addr) continue;
+        uint64_t u = (uint64_t)(uintptr_t)addr;
+        if (u == 0 || u >= 0x0000008000000000ULL) continue;  /* 跳过明显非法指针 */
+        if (is_address_in_suspicious_anon_exec(u)) {
+            LOGD("PLT/GOT: %s (0x%llx) points to suspicious anonymous r-x (possible trampoline)",
+                 syms[i], (unsigned long long)u);
             return true;
         }
     }
-
     return false;
 }
 
-// 使用 syscall 打开/读取 libc，避免 libc 的 open/close 被 hook 后误判
+bool check_plt_hooks(void) {
+    return check_got_points_to_anon_trampoline();
+}
+
+/* 使用 syscall 打开/读取 libc，避免 libc 的 open/close 被 hook 后误判 */
 bool check_library_integrity(void) {
     int fd = my_open("/system/lib64/libc.so", O_RDONLY, 0);
     if (fd < 0) {

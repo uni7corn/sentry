@@ -14,7 +14,16 @@ ssize_t my_read(int fd, void *buf, size_t count);
 ssize_t my_write(int fd, const void *buf, size_t count);
 int my_open(const char *pathname, int flags, mode_t mode);
 int my_close(int fd);
+
+/** 先尝试 syscall 打开，失败时回退到 libc open，提高兼容性。*out_used_syscall=1 表示用 syscall 打开，后续读用 read_with_fallback。 */
+int open_with_fallback(const char *pathname, int flags, mode_t mode, int *out_used_syscall);
+/** 根据 open_with_fallback 的 out_used_syscall 选择 my_read 或 libc read，与 open_with_fallback 配套使用。 */
+ssize_t read_with_fallback(int fd, void *buf, size_t count, int used_syscall);
 int my_access(const char *pathname, int mode);
+pid_t my_getpid(void);
+int my_kill(pid_t pid, int sig);
+int my_gettid(void);
+int my_tgkill(pid_t pid, int tid, int sig);
 ssize_t my_lseek(int fd, off_t offset, int whence);
 
 // Socket syscalls (bypass libc hooks for connect/socket/close/send/recv)

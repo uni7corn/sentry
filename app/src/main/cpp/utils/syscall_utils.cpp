@@ -16,6 +16,18 @@
 #ifndef __NR_lseek
 #define __NR_lseek    62
 #endif
+#ifndef __NR_getpid
+#define __NR_getpid  172
+#endif
+#ifndef __NR_kill
+#define __NR_kill    129
+#endif
+#ifndef __NR_gettid
+#define __NR_gettid  178
+#endif
+#ifndef __NR_tgkill
+#define __NR_tgkill  268
+#endif
 #elif defined(__arm__)
 #ifndef __NR_socketcall
 #define __NR_socketcall 281
@@ -114,6 +126,21 @@ int my_close(int fd) {
     return do_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
 }
 
+int open_with_fallback(const char *pathname, int flags, mode_t mode, int *out_used_syscall) {
+    int fd = my_open(pathname, flags, mode);
+    if (fd >= 0) {
+        if (out_used_syscall) *out_used_syscall = 1;
+        return fd;
+    }
+    if (out_used_syscall) *out_used_syscall = 0;
+    return open(pathname, flags, mode);
+}
+
+ssize_t read_with_fallback(int fd, void *buf, size_t count, int used_syscall) {
+    if (used_syscall) return my_read(fd, buf, count);
+    return read(fd, buf, count);
+}
+
 int my_access(const char *pathname, int mode) {
 #if defined(__NR_access)
     return do_syscall(__NR_access, (long)pathname, mode, 0, 0, 0, 0);
@@ -121,6 +148,30 @@ int my_access(const char *pathname, int mode) {
     return do_syscall(__NR_faccessat, -100, (long)pathname, mode, 0, 0, 0);
 #endif
 }
+
+#if defined(__NR_getpid) && defined(__NR_kill)
+pid_t my_getpid(void) {
+    return (pid_t) do_syscall(__NR_getpid, 0, 0, 0, 0, 0, 0);
+}
+int my_kill(pid_t pid, int sig) {
+    return (int) do_syscall(__NR_kill, pid, sig, 0, 0, 0, 0);
+}
+#else
+pid_t my_getpid(void) { return (pid_t) getpid(); }
+int my_kill(pid_t pid, int sig) { (void)pid; (void)sig; return -1; }
+#endif
+
+#if defined(__NR_gettid) && defined(__NR_tgkill)
+int my_gettid(void) {
+    return (int) do_syscall(__NR_gettid, 0, 0, 0, 0, 0, 0);
+}
+int my_tgkill(pid_t pid, int tid, int sig) {
+    return (int) do_syscall(__NR_tgkill, pid, tid, sig, 0, 0, 0);
+}
+#else
+int my_gettid(void) { return -1; }
+int my_tgkill(pid_t pid, int tid, int sig) { (void)pid; (void)tid; (void)sig; return -1; }
+#endif
 
 #if defined(__NR_lseek)
 ssize_t my_lseek(int fd, off_t offset, int whence) {

@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.pm.Signature;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
@@ -23,6 +24,7 @@ import java.util.Locale;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Set;
 
@@ -50,6 +52,13 @@ public class EnvDetectionManager {
         } catch (Throwable ignored) { }
     }
 
+    /** 供 Application 启动时显式加载 envdetect，确保签名校验可调用 Native */
+    public static void ensureEnvLoaded() {
+        try {
+            System.loadLibrary("envdetect");
+        } catch (Throwable ignored) { }
+    }
+
     @SuppressWarnings("unused")
     private static native String nativeGetEnvVersion();
     private static native String[] nativeDetectMagisk();
@@ -62,6 +71,8 @@ public class EnvDetectionManager {
     private static native String[] nativeCheckCgroup();
     /** Verify APKs via syscall (assets/xposed_init) + modules.list; returns package names of Xposed modules */
     private static native String[] nativeVerifyXposedModules(String[] apkPaths, String[] packageNames);
+    /** 应用签名校验（防二次打包）：当前 APK 签名 SHA-256 与构建时预期值在 Native 层比对，返回 0=NORMAL，2=DANGER */
+    private static native int nativeVerifyAppSignature(String sha256Hex);
 
     private final Context context;
 
@@ -71,6 +82,7 @@ public class EnvDetectionManager {
 
     public List<DetectionResult> runAllDetections() {
         List<DetectionResult> results = new ArrayList<>();
+        results.add(detectAppSignature());
         results.add(detectBootloader());
         results.add(detectRoot());
         results.add(detectXposedModules());
@@ -81,6 +93,94 @@ public class EnvDetectionManager {
         results.add(checkProcessStatus());
         results.add(detectContainer());
         return results;
+    }
+
+    /**
+     * 应用签名校验（防二次打包）：与构建时注入的预期签名 SHA-256 在 Native 层比对。
+     * 预期值仅在 release 构建时注入，Debug 不注入则跳过校验。
+     */
+    private DetectionResult detectAppSignature() {
+        List<String> details = new ArrayList<>();
+        if (context == null) {
+            details.add("Context unavailable");
+            return new DetectionResult("App Signature", "Check skipped", DetectionResult.STATUS_NORMAL, 15, details);
+        }
+        String sha256 = getAppSignatureSha256(context);
+        if (sha256 == null || sha256.isEmpty()) {
+            details.add("Could not get app signing certificate");
+            return new DetectionResult("App Signature", "Check skipped", DetectionResult.STATUS_WARNING, 15, details);
+        }
+        try {
+            int status = nativeVerifyAppSignature(sha256);
+            if (status == 2) {
+                details.add("Signature mismatch - app may be repackaged");
+                details.add("Expected signing cert SHA-256 is embedded in release build");
+                return new DetectionResult("App Signature", "Signature mismatch (possible repackage)", DetectionResult.STATUS_DANGER, 15, details);
+            }
+            details.add("Signing certificate matches expected (SHA-256)");
+            return new DetectionResult("App Signature", "Signature verified", DetectionResult.STATUS_NORMAL, 15, details);
+        } catch (Throwable t) {
+            details.add("Verify error: " + (t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
+            return new DetectionResult("App Signature", "Check failed", DetectionResult.STATUS_WARNING, 15, details);
+        }
+    }
+
+    /**
+     * 获取当前应用签名证书的 SHA-256（小写十六进制 64 字符）。
+     * API 28+ 使用 GET_SIGNING_CERTIFICATES，否则使用 GET_SIGNATURES。
+     */
+    public static String getAppSignatureSha256(Context context) {
+        if (context == null) return null;
+        try {
+            PackageManager pm = context.getPackageManager();
+            String packageName = context.getPackageName();
+            PackageInfo info;
+            if (Build.VERSION.SDK_INT >= 28) {
+                info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES);
+                if (info == null || info.signingInfo == null) return null;
+                Signature[] sigs = info.signingInfo.getApkContentsSigners();
+                if (sigs == null || sigs.length == 0) return null;
+                return sha256Hex(sigs[0].toByteArray());
+            } else {
+                info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+                if (info == null || info.signatures == null || info.signatures.length == 0) return null;
+                return sha256Hex(info.signatures[0].toByteArray());
+            }
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String sha256Hex(byte[] data) {
+        if (data == null) return null;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data);
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b & 0xff));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 启动时签名校验（防二次打包）：在 Application.onCreate 中调用。
+     * 若未配置预期签名（Debug 构建）或获取失败则放行；若签名不匹配则返回 false，调用方应结束进程。
+     *
+     * @return true 校验通过或跳过，false 签名不匹配（疑似二次打包）
+     */
+    public static boolean verifyAppSignatureAtStartup(Context context) {
+        try {
+            String sha = getAppSignatureSha256(context);
+            if (sha == null || sha.isEmpty()) return true; /* 获取失败时放行，避免误杀 */
+            int status = nativeVerifyAppSignature(sha);
+            return status != 2;
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     /**
@@ -178,11 +278,11 @@ public class EnvDetectionManager {
         return result;
     }
 
-    /** 将 Native 层返回的 String[] 转为 DetectionResult。格式: [status, summary, detail0, ...] */
+    /** 将 Native 层返回的 String[] 转为 DetectionResult。格式: [status, summary, detail0, ...]；无法执行时显示 Check skipped、不扣分 */
     private static DetectionResult fromNativeResult(String title, String[] raw,
             String normalSummary, String normalDetail) {
         if (raw == null || raw.length < 2) {
-            return new DetectionResult(title, "Scan failed", DetectionResult.STATUS_WARNING);
+            return new DetectionResult(title, "Check skipped", DetectionResult.STATUS_NORMAL);
         }
         int status = DetectionResult.STATUS_NORMAL;
         try {

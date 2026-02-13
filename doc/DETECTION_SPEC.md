@@ -3,22 +3,22 @@
 本文档详细描述 Sentry 安全检测应用中的各项检测、评分机制、实现方式以及设计目的。
 
 > **维护要求**：本规范应与代码实现保持同步。根据 `.cursor/rules/modify-after-structure.mdc`，重大变更（如新增/删除检测项、修改实现层或逻辑等）完成后，须同步更新本文档及 `.cursor/skills/sentry-project-structure/SKILL.md`。  
-> **一致性**：本文档已与当前代码库对齐（检测项 8+9=17、权重、JNI/Native 接口、文件路径）。
+> **一致性**：本文档已与当前代码库对齐（检测项 11+10=21、权重、JNI/Native 接口、文件路径）。
 
 ---
 
 ## 一、检测总览
 
-Sentry 提供 **17 项** 安全检测，分为两类：
+Sentry 提供 **21 项** 安全检测，分为两类：
 
 | 类别       | 数量 | 管理类                     | 展示位置   |
 |------------|------|----------------------------|------------|
-| 调试检测   | 8    | `DebugDetectionManager`    | 调试检测 Tab |
-| 环境检测   | 9    | `EnvDetectionManager`     | 环境检测 Tab |
+| 调试检测   | 11   | `DebugDetectionManager`    | 调试检测 Tab |
+| 环境检测   | 10   | `EnvDetectionManager`     | 环境检测 Tab |
 
 ### 1.1 检测项与权重一览表
 
-**执行顺序**：与 `runAllDetections()` 一致。调试检测 1→8 由 `DebugDetectionManager` 顺序执行；环境检测 9→17 由 `EnvDetectionManager` 顺序执行。`DetectionManager.runAllDetections()` 先执行全部调试 8 项、再执行全部环境 9 项（顺序执行，非并行）。
+**执行顺序**：与 `runAllDetections()` 一致。调试检测 1→11 由 `DebugDetectionManager` 顺序执行；环境检测 12→21 由 `EnvDetectionManager` 顺序执行。`DetectionManager.runAllDetections()` 先执行全部调试 11 项、再执行全部环境 10 项（顺序执行，非并行）。**应用启动时**（`SentryApp.onCreate`）会先执行签名校验，不通过则直接退出进程，防止二次打包。
 
 | 序号 | 检测项标题 | 类别 | maxScore | warnOnly | 说明 |
 |------|------------|------|----------|----------|------|
@@ -29,20 +29,24 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | 5 | Ptrace / IDA Attach | 调试 | 10 | — | TracerPid 检测 |
 | 6 | Debugger Attached | 调试 | 10 | — | Debug.isDebuggerConnected() |
 | 7 | Xposed / Hook Framework | 调试 | 10 | — | Xposed/LSPosed + Native Hook |
-| 8 | Dirty Page / Memory Injection | 调试 | 10 | — | Smaps Private_Dirty + VMap + Pagemap bit 55 脏页/内存注入特征 |
-| 9 | Bootloader | 环境 | **15** | — | 启动验证/锁定状态 + TEE RootOfTrust |
-| 10 | Magisk / Root | 环境 | **12** | — | Magisk/root 环境 |
-| 11 | Dangerous Apps | 环境 | **5** | **是** | 多渠道检测 Xposed 模块（meta-data、APK assets/xposed_init、modules.list）；仅警告不扣分 |
-| 12 | Suspicious Files | 环境 | 10 | — | Frida/Magisk 等可疑路径 |
-| 13 | Emulator | 环境 | 10 | — | 模拟器特征 |
-| 14 | Kernel Patch | 环境 | 10 | **是** | 安全补丁陈旧度；过期仅警告不扣分 |
-| 15 | ADB Debug | 环境 | **5** | **是** | 仅警告不扣分 |
-| 16 | Multi-instance | 环境 | **5** | — | 多开/分身环境 |
-| 17 | Container / Virtualization | 环境 | **8** | — | 容器/虚拟化 |
+| 8 | SO Code Integrity | 调试 | 10 | — | dl_iterate_phdr + 内存 Hook 特征扫描 + 匿名 r-xp 段（不读磁盘，避免 SELinux/XOM） |
+| 9 | ArtMethod Entry | 调试 | 10 | — | Java 方法 entry_point 是否在 libart/oat 外（Frida trampoline） |
+| 10 | Hook Trap | 调试 | 10 | — | SIGTRAP 是否被本进程 handler 捕获（诱捕检测） |
+| 11 | Dirty Page / Memory Injection | 调试 | 10 | — | Smaps Private_Dirty + VMap + Pagemap bit 55 脏页/内存注入特征 |
+| 12 | **App Signature** | 环境 | **15** | — | 防二次打包：当前 APK 签名 SHA-256 与 release 构建时注入的预期值在 Native 层比对 |
+| 13 | Bootloader | 环境 | **15** | — | 启动验证/锁定状态 + TEE RootOfTrust |
+| 14 | Magisk / Root | 环境 | **12** | — | Magisk/root 环境 |
+| 15 | Dangerous Apps | 环境 | **5** | **是** | 多渠道检测 Xposed 模块（meta-data、APK assets/xposed_init、modules.list）；仅警告不扣分 |
+| 16 | Suspicious Files | 环境 | 10 | — | Frida/Magisk 等可疑路径 |
+| 17 | Emulator | 环境 | 10 | — | 模拟器特征 |
+| 18 | Kernel Patch | 环境 | 10 | **是** | 安全补丁陈旧度；过期仅警告不扣分 |
+| 19 | ADB Debug | 环境 | **5** | **是** | 仅警告不扣分 |
+| 20 | Multi-instance | 环境 | **5** | — | 多开/分身环境 |
+| 21 | Container / Virtualization | 环境 | **8** | — | 容器/虚拟化 |
 
 ---
 
-## 二、调试检测（8 项）
+## 二、调试检测（11 项）
 
 ### 2.1 Frida Threads
 
@@ -67,11 +71,11 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 | 属性     | 说明 |
 |----------|------|
-| **目的** | 检测进程内存映射中是否存在 Frida/LSPosed 相关库或字符串；**增强**：匿名可执行内存、**QuickJS/frida-java-bridge/linjector**（OWASP MASTG：Frida 当前用 QuickJS，frida-java-bridge 等） |
+| **目的** | 检测进程内存映射中是否存在 Frida/LSPosed 相关库或字符串；**增强**：匿名可执行内存、**QuickJS/frida-java-bridge/linjector**（OWASP MASTG）、**Trampoline 特征码** |
 | **实现层** | Native（C++，`memory_scanner.cpp`） |
-| **实现** | 1) **签名匹配**：使用 syscall 读 `/proc/self/maps`，逐行匹配 `frida`、`FRIDA`、`gum-js`、`gumjs`、`gobject`、`gmain`、`frida-agent`、`frida-gadget`、`frida-server`、**`frida-java-bridge`**、**`linjector`**、**`QuickJS`/`quickjs`/`libquickjs`**、`liblspd.so`、`libriru.so`、`libxposed`、`org.lsposed`、**zygisk_lsposed**、**zygisk** 等；2) **匿名可执行内存**：解析 maps 行，匿名路径（排除 [vdso]/[vvar]/[stack]/[heap]）+ 可执行 + 大小 ≥128KB，最多 2 条 |
+| **实现** | 1) **签名匹配**：使用 syscall 读 `/proc/self/maps`，逐行匹配 `frida`、`FRIDA`、`gum-js`、`gumjs`、`gobject`、`gmain`、`frida-agent`、`frida-gadget`、`frida-server`、**`frida-java-bridge`**、**`linjector`**、**`QuickJS`/`quickjs`/`libquickjs`**、`liblspd.so`、`libriru.so`、`libxposed`、`org.lsposed`、**zygisk_lsposed**、**zygisk** 等；2) **匿名可执行内存**：解析 maps 行，**排除白名单** [vdso]/[vvar]/[stack]/[heap]、[anon:dalvik-jit-code-cache]、[anon:scudo:*]、[anon:linker_alloc]、[anon:libc_malloc]、[anon:jit-cache*] 等良性段；匿名 + 可执行 + 大小 ≥128KB（高级 4KB），最多 2 条；3) **Trampoline 特征码**：对可疑匿名 r-x 段读取前 64KB，搜索 ARM64 LDR X16/X17 [PC]; BR X16/X17 指令序列，≥2 处匹配则报「Anonymous r-x with trampoline-like code」 |
 | **状态** | 发现任一签名或可疑匿名可执行内存 → `DANGER`；未发现 → `NORMAL` |
-| **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；QuickJS/engine 存在最好与端口/Frida 痕迹联合判定以降低误报（部分 App 自带 JS 引擎）；**设置 → 高级检测** 下匿名可执行阈值 4KB |
+| **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；白名单排除 JIT/分配器减少误报；Trampoline 扫描需 ≥2 匹配降低误报；**设置 → 高级检测** 下匿名可执行阈值 4KB |
 
 ### 2.4 Maps 二次检测 (Java exec)
 
@@ -107,10 +111,38 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Xposed/LSPosed/EdXposed 框架及内联/PLT Hook、特征路径与注入 fd |
 | **实现层** | Java + Native（`hook_detector.cpp`、`xposed_detector.cpp`、`memory_scanner.cpp`）；入口方法名 `checkLibraryIntegrity(Context)` |
-| **实现** | 1) **Java**（检测**当前进程**是否被 hook）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `findAndHookMethod`、`hookAllMethods` 等；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed` 等。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：Xposed/LSPosed/Riru 路径、Zygisk fexecve、LD_PRELOAD/MAGISKTMP、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：maps 中匹配 libxposed、org.lsposed、zygisk 等；⑦ **内联 Hook / 完整性**（`hook_detector.cpp`）：**ARM64 LDR+BR 序言检测**（Frida Interceptor 典型 LDR X16/X17 [PC]; BR X16/X17）、无条件 B 跳转、PLT/GOT（malloc 不在 libc）、**libc 完整性**（用 **syscall** `my_open`/`my_close` 打开 `/system/lib64/libc.so` 或 `/system/lib/libc.so`，避免 open 被 hook 后误判）；⑧ **LR 寄存器检测**（ARM64）：`detect_hooks()` 入口读 LR(x30)，若返回地址不在本模块则判为 trampoline 式 inline hook，用 syscall 解析 `/proc/self/maps` 取模块边界。 |
+| **实现** | 1) **Java**（检测**当前进程**是否被 hook）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `findAndHookMethod`、`hookAllMethods` 等；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed` 等。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：Xposed/LSPosed/Riru 路径、Zygisk fexecve、LD_PRELOAD/MAGISKTMP、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：maps 中匹配 libxposed、org.lsposed、zygisk 等；⑦ **内联 Hook / libc 可打开性**（`hook_detector.cpp`）：**ARM64 LDR+BR 序言检测**（Frida Interceptor 典型 LDR X16/X17 [PC]; BR X16/X17）、无条件 B 跳转、**PLT/GOT 指针逃逸**（`check_got_points_to_anon_trampoline`：malloc/open/read 等 dlsym 地址若落在可疑匿名 r-x 段则判为 GOT hook）、**libc 可打开性**（用 **syscall** `my_open`/`my_close` 打开 libc，无法打开则判为可疑）；⑧ **LR 寄存器检测**（ARM64）：`detect_hooks()` 入口读 LR(x30)，若返回地址不在本模块则判为 trampoline 式 inline hook，用 syscall 解析 `/proc/self/maps` 取模块边界。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
 
-### 2.8 Dirty Page / Memory Injection（脏页/内存注入）
+### 2.8 SO Code Integrity（SO 代码段完整性）
+
+| 属性     | 说明 |
+|----------|------|
+| **目的** | 检测 libc.so 是否被 Inline Hook（Frida Trampoline 等），采用**内存特征扫描**，不读磁盘文件 |
+| **实现层** | Native（`so_integrity.cpp`）；JNI `nativeGetSoIntegrityResult()`，独立检测项 |
+| **实现** | **方案 A（主）**：1) 使用 **`dl_iterate_phdr`**（`<link.h>`）遍历已加载库，用 `strstr(dlpi_name, "/libc.so")` 匹配 libc；2) 对 libc 的 **PT_LOAD + PF_X** 可执行段，在内存中做 **Hook 特征码扫描**（ARM64：stp x29,x30 + ldr x16/x17 + br 等 Frida Trampoline 典型指令序列，以及异常远距离 B 跳转），仅扫描每段前 64KB 以控制耗时；3) 发现特征则判为 DANGER。**方案 B（辅）**：4) 读 `/proc/self/maps`（open_with_fallback），查找 **匿名可执行段**（r-xp 且无文件路径或 `[anon:...]`），排除白名单（vdso、heap、dalvik-jit、scudo、linker_alloc、libc_malloc、jit-cache 等）；5) 存在可疑匿名 r-xp 段则判为 DANGER。JNI 合并 A、B：任一侧检出即 status=2（DANGER）；均未检出为 NORMAL；仅当 A 未找到 libc 且 B 未检出时显示「Check skipped」。 |
+| **状态** | 方案 A 或 B 任一检出 → `DANGER`；均未检出 → `NORMAL`；无法执行有效检查 → `NORMAL`（Check skipped） |
+| **设计说明** | **放弃「文件 CRC 对比」**：Android 10+（targetSdk≥29）下 SELinux 禁止 untrusted_app 直接读 `/system/lib*`、`/apex` 下 libc，open 会失败；部分设备启用 XOM（Execute-Only Memory）时读代码段会 SIGSEGV。`dl_iterate_phdr` 使用动态链接器 API 获取已映射的 libc 信息，仅对**本进程已加载**的代码段做特征扫描，不访问磁盘、不受 SELinux/XOM 限制，适用于所有版本。 |
+
+### 2.9 ArtMethod Entry（Java 方法入口检测）
+
+| 属性     | 说明 |
+|----------|------|
+| **目的** | 检测关键 Java 方法（如 Activity.onCreate）的 ArtMethod 入口是否指向 libart/oat 外（Frida 对 Java 方法 Hook 会令 entry_point 指向 trampoline） |
+| **实现层** | Native（`art_method_detector.cpp`）；JNI `nativeGetArtMethodCheckResult(Class<?>)`，传入 `Activity.class` |
+| **实现** | 1) 通过 JNI `GetMethodID(Activity, "onCreate", "(Landroid/os/Bundle;)V")` 取得 jmethodID（ART 中即 ArtMethod*）；2) 读取 ArtMethod 内 entry_point 指针（arm64 常见偏移 48/56）；3) 用 syscall 读 `/proc/self/maps` 收集 libart、oat、.so、boot 等可执行区间；4) 若 entry_point 不在任一合法可执行区间内则判为疑似 Frida trampoline。 |
+| **状态** | entry_point 在 libart/oat 外 → `DANGER`；在范围内或无法检查 → `NORMAL` |
+
+### 2.10 Hook Trap（Hook 陷阱检测）
+
+| 属性     | 说明 |
+|----------|------|
+| **目的** | 诱捕检测：注册本进程 SIGTRAP 处理函数，通过 syscall 发送 SIGTRAP，若信号未被我们自己的 handler 捕获（longjmp 回检测点）则疑为被 Frida 等劫持 |
+| **实现层** | Native（`trap_detector.cpp`）；JNI `nativeGetTrapCheckResult()` |
+| **实现** | 1) 注册 SIGTRAP 处理函数（handler 内 setjmp 返回后 longjmp 回检测点）；2) 使用 **syscall** `my_kill(my_getpid(), SIGTRAP)` 发送信号，避免 libc raise 被 hook；3) 若我们的 handler 被调用则 longjmp 返回，判为 NORMAL；4) 若从 `my_kill` 返回（即其他 handler 处理了信号并返回）则判为 DANGER。 |
+| **状态** | 我们的 handler 未运行 → `DANGER`；我们的 handler 已运行 → `NORMAL` |
+
+### 2.11 Dirty Page / Memory Injection（脏页/内存注入）
 
 | 属性     | 说明 |
 |----------|------|
@@ -122,9 +154,20 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 ---
 
-## 三、环境检测（9 项）
+## 三、环境检测（10 项）
 
-### 3.1 Bootloader
+### 3.1 App Signature（应用签名校验，防二次打包）
+
+| 属性     | 说明 |
+|----------|------|
+| **目的** | 防止 APK 被二次打包：运行时获取当前应用签名证书的 SHA-256，与 **release 构建时** 注入的预期值在 **Native 层** 比对；不匹配则判定为疑似重签名/二次打包。 |
+| **实现层** | Java（获取签名 SHA-256）+ Native（`signature_checker.cpp`，比对；预期值由 Gradle 在 release 构建时经 CMake 注入） |
+| **实现** | 1) **Java**：`PackageManager.getPackageInfo(GET_SIGNING_CERTIFICATES)`（API 28+）或 `GET_SIGNATURES`，取首签名的 `toByteArray()`，SHA-256 后转为小写十六进制 64 字符；2) **Native**：`verify_app_signature(current_sha256_hex)` 与编译期宏 `EXPECTED_SIGNATURE_SHA256` 比较（不区分大小写）；未配置预期值（如 Debug 构建）则跳过返回 NORMAL；3) **启动时**：`SentryApp.onCreate()` 中调用 `EnvDetectionManager.verifyAppSignatureAtStartup(context)`，若返回 false 则 `Process.killProcess` + `System.exit(1)`。 |
+| **状态** | 签名不匹配 → `DANGER`；一致或未配置预期值 → `NORMAL`；获取失败 → `WARNING`（启动时获取失败则放行避免误杀） |
+| **权重** | `maxScore = 15` |
+| **构建** | release 构建时 Gradle 执行 `keytool -list -v -keystore release.keystore` 解析 SHA256 行并传入 CMake `-DEXPECTED_SIGNATURE_SHA256=...`；Debug 不传入则 Native 跳过校验。 |
+
+### 3.2 Bootloader
 
 | 属性     | 说明 |
 |----------|------|
@@ -136,7 +179,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **权重** | `maxScore = 15` |
 | **详情展示** | 系统属性（verifiedbootstate、flash.locked、veritymode 等）+ **OEM Unlock Cross-Verify**（Settings.Global vs Native）+ Key Attestation 的 **Device State**（deviceLocked、verifiedBootState、verifiedBootKey、verifiedBootHash）与 **Security Impact**，与 Hunter 等工具检测一致 |
 
-### 3.2 Magisk / Root
+### 3.3 Magisk / Root
 
 | 属性     | 说明 |
 |----------|------|
@@ -145,7 +188,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 1) Native：检测 `/data/adb/magisk`、`/data/adb/modules`、Shamiko（zygisk_shamiko）、zygisk_* 模块；2) Java：检查是否安装 `com.topjohnwu.magisk`、`io.github.huskydg.magisk` |
 | **状态** | 任意一项存在 → `DANGER` |
 
-### 3.3 Dangerous Apps
+### 3.4 Dangerous Apps
 
 | 属性     | 说明 |
 |----------|------|
@@ -155,7 +198,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **状态** | 任一渠道发现 Xposed 模块 → `WARNING`；未发现 → `NORMAL` |
 | **设计说明** | **warnOnly=true**：仅警告不扣分。检测到危险应用未必代表正在 hook 本应用，仅提示用户设备上存在可 hook 的模块。Native 层使用 syscall 绕过 libc，降低被 hook 风险 |
 
-### 3.4 Suspicious Files
+### 3.5 Suspicious Files
 
 | 属性     | 说明 |
 |----------|------|
@@ -164,7 +207,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 1) 扫描 `/data/local/tmp` 中文件名包含 `frida-server` 的项；2) 检测路径 `/data/local/tmp/re.frida.server`；3) 检测目录/文件：`/data/adb/magisk`、`/data/adb/modules`、`/data/adb/lspd` 等（具体列表见 `env_detector.cpp` 中 `SUSPICIOUS_ADB_PATHS`） |
 | **状态** | 发现任意可疑路径 → `DANGER` |
 
-### 3.5 Emulator
+### 3.6 Emulator
 
 | 属性     | 说明 |
 |----------|------|
@@ -173,7 +216,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 1) **Build 属性**：上述字段含 `generic`、`unknown`、`google_sdk`、`sdk`、`vbox86p`、`emulator`、`ranchu`、`goldfish` 等（见 `EMULATOR_INDICATORS`）；2) **设备文件**：如 `/dev/socket/qemud`、`/dev/qemu_pipe`、`/system/lib/libc_malloc_debug_qemu.so` 等（见 `EMULATOR_FILES`）；3) **BlueStacks**：`/data/misc/emu/update_check.cfg` |
 | **状态** | 发现指标 → `WARNING`（避免对部分真机误报） |
 
-### 3.6 Kernel Patch
+### 3.7 Kernel Patch
 
 | 属性     | 说明 |
 |----------|------|
@@ -182,7 +225,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 解析 `Build.VERSION.SECURITY_PATCH` 日期，计算距今月数；≥24 月或 ≥12 月均 → `WARNING`（仅提示风险，不代表灰产/恶意设备） |
 | **状态** | 补丁过旧仅作警告，不判为危险；**warnOnly=true**，过期不扣分 |
 
-### 3.7 ADB Debug
+### 3.8 ADB Debug
 
 | 属性     | 说明 |
 |----------|------|
@@ -191,7 +234,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | **Native（syscall）**：① 端口 syscall connect 检测 5555、5556、5557、5558；② 解析 `/proc/net/tcp` 搜索 ADB 端口十六进制（15B3/15B4/15B5/15B6）；③ 扫描 `/proc/*/comm` 检测 adbd 进程；④ 读取 `/sys/class/android_usb/android0/state` 若为 CONFIGURED/CONNECTED；**Java Settings API**：`development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled`；**Java exec 替代路径**：`getprop init.svc.adbd`、`settings get global adb_enabled`、`adb_wifi_enabled`、`settings get secure development_settings_enabled`，绕过 ContentResolver hook |
 | **状态** | 任一通道发现指标 → `WARNING`（仅提示不扣分：`warnOnly=true`，部分设备需开启 ADB 做开发） |
 
-### 3.8 Multi-instance（多开）
+### 3.9 Multi-instance（多开）
 
 | 属性     | 说明 |
 |----------|------|
@@ -200,7 +243,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 | **实现** | 包名包含 `:` 或 `dual`；`getFilesDir()` 路径含 `parallel`、`dual`、`clone`、`multi` |
 | **状态** | 符合 → `WARNING` |
 
-### 3.9 Container / Virtualization
+### 3.10 Container / Virtualization
 
 | 属性     | 说明 |
 |----------|------|
@@ -243,7 +286,23 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 - 其余 12 项均为默认 10 分
 
-### 4.3 总分计算
+### 4.3 Check Skipped（无法执行检测时）
+
+当某项检测因**权限不足、无法读取/解析**（如 `/proc/self/maps`、`/proc/self/task`、`/proc/self/status` 不可读，或 Native 库未加载、信号/线程设置失败等）而无法执行时，统一显示 **「Check skipped」**，状态为 **NORMAL**（不扣分），避免误报与无意义警告。
+
+| 检测项 | 触发「Check skipped」的典型情况 |
+|--------|--------------------------------|
+| SO Code Integrity | libc 未在 dl_iterate_phdr 中找到（Native check_libc_text_integrity 返回 -1）且匿名段未检出 |
+| Memory Signatures | 无法打开 `/proc/self/maps`（Native 返回 -1） |
+| Frida Threads | 无法打开 `/proc/self/task`（Native 返回 -1） |
+| ArtMethod Entry | 无法读取 maps 或 exec 区间为空、Activity.onCreate 不存在（Native 返回 -1） |
+| Hook Trap | sigaction 或 pthread 设置失败（Native 返回 -1） |
+| Ptrace / IDA Attach | 无法读取 `/proc/self/status`（Java 读文件异常） |
+| Maps detection (Java exec) | `exec("cat /proc/pid/maps")` 失败或 I/O 异常 |
+| 所有依赖 Native 的项 | JNI 返回 null 或 length&lt;2（库未加载或异常）时，Java 层显示「Check skipped」、STATUS_NORMAL |
+| 环境检测（fromNativeResult） | Native 返回 null 或 length&lt;2 时，显示「Check skipped」、STATUS_NORMAL |
+
+### 4.4 总分计算
 
 ```
 总分 = Σ earnedScore
@@ -255,7 +314,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 - **满分** = 调试 9×10 + 环境（15+12+5+10+10+10+5+5+8）= 90 + 80 = **170**
 - 总分在概览页以百分比形式展示：`安全百分比 = (Σ earnedScore / 170) × 100%`
 
-### 4.4 Native 返回格式
+### 4.5 Native 返回格式
 
 Native 检测统一返回 `String[]`：
 - `[0]`：状态数字字符串（`"0"`=NORMAL / `"1"`=WARNING / `"2"`=DANGER）
@@ -263,7 +322,8 @@ Native 检测统一返回 `String[]`：
 - `[2..n]`：详情 details（展开时展示；若无详情则通常填一条说明如 "No issues detected"）
 
 示例（无异常）：`["0", "No Magisk detected", "No issues detected"]`  
-示例（有异常）：`["2", "Magisk or root indicator(s) found", "Suspicious path: /data/adb/magisk"]`
+示例（有异常）：`["2", "Magisk or root indicator(s) found", "Suspicious path: /data/adb/magisk"]`  
+示例（无法检查）：SO Integrity 等返回 status=0、summary 含「Could not perform check」、detail 为「Check skipped」；Memory/Thread/ArtMethod/Trap 等 Native 用返回值 -1 表示 skipped，JNI 构造 status=0 + 「Check skipped」。
 
 ---
 
@@ -279,8 +339,8 @@ Native 检测统一返回 `String[]`：
 ### 5.2 Syscall 优先
 
 - 敏感 I/O、网络、文件访问优先使用 **syscall**，绕过 libc
-- 使用 `syscall_utils.cpp` 提供的：`my_open`、`my_read`、`my_close`、`my_access`、`my_socket`、`my_connect`、`my_strstr`、`my_strcmp` 等
-- 减少 Frida/Xposed 对 libc 的 hook 影响
+- 使用 `syscall_utils.cpp` 提供的：`my_open`、`my_read`、`my_close`、`open_with_fallback`、`read_with_fallback`、`my_access`、`my_socket`、`my_connect`、`my_strstr`、`my_strcmp` 等
+- 减少 Frida/Xposed 对 libc 的 hook 影响；`open_with_fallback` 在 syscall 打开失败时回退到 libc `open`，提高系统兼容性
 
 ### 5.3 误报控制
 
@@ -297,6 +357,21 @@ Native 检测统一返回 `String[]`：
 
 - `DetectionResult` 支持 `warnOnly` 参数。当 `warnOnly=true` 且状态为 `WARNING` 时，`getEarnedScore()` 仍返回满分（与 NORMAL 一致），仅 UI 显示警告。
 - 用途：如 **ADB Debug**，部分设备需开启 ADB 做开发，判为危险会误伤，故仅提示、不参与扣分；**Kernel Patch** 安全补丁过期（如约 2 个月）仅提示风险，不代表灰产/恶意设备，故也设为 warnOnly，不扣分；**Dangerous Apps** 应用列表中检测到危险应用（如 Xposed 模块）时仅提示，不扣分（安装模块未必代表正在 hook 本应用）。
+
+### 5.6 多通道与健壮性（检测方式多样、全方位）
+
+- **原则**：不依赖单一手段，同一目标尽量多通道、多方式检测，充分发挥可用 API 与能力，防止系统兼容性问题与单点失效。
+- **文件读取**：
+  - **Native**：对 `/proc/self/maps`、`/proc/self/task/*/comm`、`/proc/self/smaps`、`/proc/1/cgroup` 等使用 `open_with_fallback` + `read_with_fallback`（先 syscall 再 libc），在 syscall 不可用或受限时仍可读。
+  - **Java**：`readProcFileWithFallback(path)` 先 `FileReader` 再 `exec("cat path")`；用于 **Ptrace**（`/proc/self/status`）及 **Maps 二次检测**（先 FileReader 再 exec），与 Native 读 maps 形成多通道。
+- **已有多通道的检测项**：
+  - **Maps**：Native syscall/fallback 读 maps + Java FileReader/exec 双路径，与 Memory Signatures 共用 Native 通道。
+  - **ADB**：Native syscall（端口/net/tcp/adbd/sysfs）+ Java Settings API + Java exec（getprop/settings）。
+  - **Bootloader**：Native 系统属性 + Key Attestation（TEE）+ OEM 解锁交叉验证。
+  - **Dangerous Apps**：Java meta-data + Native APK（assets/xposed_init）+ modules.list。
+  - **Xposed/Hook**：Java（Class.forName、堆栈、反射、ClassLoader）+ Native（路径/fd、内联/PLT、maps、LR 寄存器）。
+  - **Frida Ports**：connect 探测 + /proc/net/tcp 解析 + frida-server 进程 + Frida 进程名 + D-Bus AUTH。
+- **Debugger**：`Debug.isDebuggerConnected()` 为单 API，可与 Ptrace（TracerPid）联合解读；Ptrace 已用 FileReader + exec 双通道读 status。
 
 ---
 
@@ -411,11 +486,15 @@ UI 展示（OverviewFragment）
 | JNI 环境库桥接 | `app/src/main/cpp/native-lib-env.cpp` |
 | 线程检测     | `app/src/main/cpp/detector/thread_detector.cpp` |
 | 端口扫描     | `app/src/main/cpp/detector/port_scanner.cpp` |
-| 内存扫描     | `app/src/main/cpp/detector/memory_scanner.cpp` |
-| Hook 检测（内联/PLT/GOT/LR 寄存器） | `app/src/main/cpp/detector/hook_detector.cpp` |
+| 内存扫描（含匿名 r-x 白名单、Trampoline 特征码、is_address_in_suspicious_anon_exec） | `app/src/main/cpp/detector/memory_scanner.cpp` |
+| Hook 检测（内联/PLT/GOT 指针逃逸/LR 寄存器） | `app/src/main/cpp/detector/hook_detector.cpp` |
+| SO 代码段完整性（dl_iterate_phdr + Hook 特征扫描 + 匿名 r-xp 段，不读文件） | `app/src/main/cpp/detector/so_integrity.cpp/h` |
+| ArtMethod 入口检测 | `app/src/main/cpp/detector/art_method_detector.cpp/h` |
+| Hook 陷阱检测（SIGTRAP） | `app/src/main/cpp/detector/trap_detector.cpp/h` |
 | Xposed 路径/fd | `app/src/main/cpp/detector/xposed_detector.cpp` |
 | 调试/进程状态（Legacy，MainActivity JNI） | `app/src/main/cpp/detector/anti_debug.cpp`（TracerPid、debug_flag、LD_PRELOAD；主 17 项流程中 Ptrace/Debugger 由 Java 实现） |
 | 环境检测 C++（Magisk/Bootloader/Zygisk/模拟器等） | `app/src/main/cpp/detector/env_detector.cpp` |
+| 应用签名校验（防二次打包，预期 SHA256 由 Gradle 注入） | `app/src/main/cpp/detector/signature_checker.cpp/h` |
 | Syscall 工具 | `app/src/main/cpp/utils/syscall_utils.cpp` |
 | Native 构建（libantidebug + libenvdetect） | `app/src/main/cpp/CMakeLists.txt` |
 | 开发规范     | `.cursor/rules/detection-development.mdc` |
@@ -660,7 +739,7 @@ JNIEXPORT jobjectArray JNICALL Java_..._nativeDetectMagisk(...) {
 
 **文件**：`app/src/main/java/anti/rusda/detector/EnvDetectionManager.java`
 
-- `runAllDetections()` 依次调用 **9 项**环境检测，顺序为：Bootloader、Magisk/Root、Dangerous Apps、Suspicious Files、Emulator、Kernel Patch、ADB Debug、Multi-instance、Container。Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
+- `runAllDetections()` 依次调用 **10 项**环境检测，顺序为：**App Signature**（防二次打包）、Bootloader、Magisk/Root、Dangerous Apps、Suspicious Files、Emulator、Kernel Patch、ADB Debug、Multi-instance、Container。Native 结果用 `fromNativeResult` 转成 `DetectionResult`。
 - **ADB Debug** 检测（多通道抗 hook）：① **Native** `nativeDetectAdb()`：syscall 端口 5555–5558、`/proc/net/tcp`、adbd 进程、sysfs USB 状态；② **Java Settings API**：`development_settings_enabled`、`adb_enabled`、`adb_wifi_enabled`；③ **Java exec**：`getprop init.svc.adbd`、`settings get global adb_enabled` 等，绕过 ContentResolver hook。任一项通道发现 → WARNING。
 - 使用 `warnOnly=true`，WARNING 时仍得满分，仅 UI 提示。
 

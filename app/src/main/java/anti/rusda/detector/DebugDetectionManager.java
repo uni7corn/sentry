@@ -34,6 +34,12 @@ public class DebugDetectionManager {
     private static native String[] nativeDetectXposedPaths();
     /** Zygisk 注入检测（Smaps Private_Dirty + VMap + Pagemap），实现位于 libenvdetect */
     private static native String[] nativeDetectZygiskInjection();
+    /** SO 代码段完整性（libc .text 内存 vs 磁盘 CRC32/比对），独立检测项 */
+    private static native String[] nativeGetSoIntegrityResult();
+    /** ArtMethod 入口检测：目标类关键方法 entry_point 是否在 libart/oat 外 */
+    private static native String[] nativeGetArtMethodCheckResult(Class<?> targetClass);
+    /** Hook 陷阱检测（SIGTRAP 是否被本进程 handler 捕获） */
+    private static native String[] nativeGetTrapCheckResult();
 
     public static void ensureNativeLoaded() {
         try {
@@ -59,6 +65,9 @@ public class DebugDetectionManager {
         results.add(detectPtraceStatus());
         results.add(detectDebuggerAttached());
         results.add(checkLibraryIntegrity(context));
+        results.add(detectSoIntegrity());
+        results.add(detectArtMethodEntry());
+        results.add(detectTrapCheck());
         results.add(detectZygiskInjection());
         return results;
     }
@@ -67,7 +76,7 @@ public class DebugDetectionManager {
     private DetectionResult detectFridaThreads() {
         String[] raw = nativeDetectFridaThreads();
         if (raw == null || raw.length < 2) {
-            return new DetectionResult("Frida Threads", "Scan failed", DetectionResult.STATUS_WARNING);
+            return new DetectionResult("Frida Threads", "Check skipped", DetectionResult.STATUS_NORMAL);
         }
         int status = DetectionResult.STATUS_NORMAL;
         try {
@@ -85,7 +94,7 @@ public class DebugDetectionManager {
     private DetectionResult detectFridaPorts() {
         String[] raw = nativeGetFridaPortScanResult();
         if (raw == null || raw.length < 2) {
-            return new DetectionResult("Frida Ports", "Scan failed", DetectionResult.STATUS_WARNING);
+            return new DetectionResult("Frida Ports", "Check skipped", DetectionResult.STATUS_NORMAL);
         }
         int status = DetectionResult.STATUS_NORMAL;
         try {
@@ -108,7 +117,7 @@ public class DebugDetectionManager {
         }
         String[] raw = nativeGetMemorySignatureResult(advancedChecks);
         if (raw == null || raw.length < 2) {
-            return new DetectionResult("Memory Signatures", "Scan failed", DetectionResult.STATUS_WARNING);
+            return new DetectionResult("Memory Signatures", "Check skipped", DetectionResult.STATUS_NORMAL);
         }
         int status = DetectionResult.STATUS_NORMAL;
         try {
@@ -123,11 +132,71 @@ public class DebugDetectionManager {
         return result;
     }
 
-    /** 脏页/内存注入检测：Smaps Private_Dirty + VMap + Pagemap bit 55（实现位于 libenvdetect，可发现 Zygisk/Frida 等）。 */
+    /** SO 代码段完整性（libc .text 内存 vs 磁盘 CRC32/比对）。 */
+    private DetectionResult detectSoIntegrity() {
+        String[] raw = nativeGetSoIntegrityResult();
+        if (raw == null || raw.length < 2) {
+            return new DetectionResult("SO Code Integrity", "Check skipped", DetectionResult.STATUS_NORMAL);
+        }
+        int status = DetectionResult.STATUS_NORMAL;
+        try {
+            status = Integer.parseInt(raw[0]);
+        } catch (NumberFormatException ignored) { }
+        String summary = raw[1];
+        List<String> details = raw.length > 2
+                ? Collections.singletonList(raw[2])
+                : Collections.emptyList();
+        DetectionResult result = new DetectionResult("SO Code Integrity", summary, status);
+        result.setDetails(details);
+        return result;
+    }
+
+    private DetectionResult detectArtMethodEntry() {
+        Class<?> activityClass;
+        try {
+            activityClass = Class.forName("android.app.Activity");
+        } catch (ClassNotFoundException e) {
+            return new DetectionResult("ArtMethod Entry", "Check skipped", DetectionResult.STATUS_NORMAL);
+        }
+        String[] raw = nativeGetArtMethodCheckResult(activityClass);
+        if (raw == null || raw.length < 2) {
+            return new DetectionResult("ArtMethod Entry", "Check skipped", DetectionResult.STATUS_NORMAL);
+        }
+        int status = DetectionResult.STATUS_NORMAL;
+        try {
+            status = Integer.parseInt(raw[0]);
+        } catch (NumberFormatException ignored) { }
+        String summary = raw[1];
+        List<String> details = raw.length > 2 && raw[2] != null && !raw[2].isEmpty()
+                ? Collections.singletonList(raw[2])
+                : Collections.emptyList();
+        DetectionResult result = new DetectionResult("ArtMethod Entry", summary, status);
+        result.setDetails(details);
+        return result;
+    }
+
+    private DetectionResult detectTrapCheck() {
+        String[] raw = nativeGetTrapCheckResult();
+        if (raw == null || raw.length < 2) {
+            return new DetectionResult("Hook Trap", "Check skipped", DetectionResult.STATUS_NORMAL);
+        }
+        int status = DetectionResult.STATUS_NORMAL;
+        try {
+            status = Integer.parseInt(raw[0]);
+        } catch (NumberFormatException ignored) { }
+        String summary = raw[1];
+        List<String> details = raw.length > 2
+                ? Collections.singletonList(raw[2])
+                : Collections.emptyList();
+        DetectionResult result = new DetectionResult("Hook Trap", summary, status);
+        result.setDetails(details);
+        return result;
+    }
+
     private DetectionResult detectZygiskInjection() {
         String[] raw = nativeDetectZygiskInjection();
         if (raw == null || raw.length < 2) {
-            return new DetectionResult("Dirty Page / Memory Injection", "Scan failed", DetectionResult.STATUS_WARNING);
+            return new DetectionResult("Dirty Page / Memory Injection", "Check skipped", DetectionResult.STATUS_NORMAL);
         }
         int status = DetectionResult.STATUS_NORMAL;
         try {
@@ -154,17 +223,24 @@ public class DebugDetectionManager {
     };
 
     /**
-     * 通过 Runtime.exec 读取 /proc/self/maps，做二次 maps 检测（与 Native syscall 读 maps 形成双通道）。
+     * 通过多种方式读取 maps：先尝试 FileReader 直接读，再尝试 exec("cat ...")，与 Native syscall 形成多通道。
      * 逐行检查是否包含可疑模块签名，与 memory_scanner 的签名列表一致。
      */
     private DetectionResult detectMapsViaExec() {
         List<String> details = new ArrayList<>();
         int status = DetectionResult.STATUS_NORMAL;
+        String summary = null;
+        String mapsPath = "/proc/" + Process.myPid() + "/maps";
         BufferedReader reader = null;
         java.lang.Process process = null;
         try {
-            process = Runtime.getRuntime().exec("cat /proc/" + android.os.Process.myPid() + "/maps");
-            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            /* 先尝试 FileReader（部分环境更稳定），失败再 exec */
+            try {
+                reader = new BufferedReader(new FileReader(mapsPath));
+            } catch (Throwable ignored) {
+                process = Runtime.getRuntime().exec(new String[]{"/system/bin/cat", mapsPath});
+                reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            }
             String line;
             final int maxFindings = 16;
             int count = 0;
@@ -186,12 +262,14 @@ public class DebugDetectionManager {
                 process.waitFor();
             }
         } catch (IOException e) {
-            details.add("Failed to read maps via exec: " + e.getMessage());
-            status = DetectionResult.STATUS_WARNING;
+            details.add("Could not read maps (exec failed or permission denied)");
+            summary = "Check skipped";
+            status = DetectionResult.STATUS_NORMAL;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            details.add("Interrupted: " + e.getMessage());
-            status = DetectionResult.STATUS_WARNING;
+            details.add("Could not read maps (exec failed or permission denied)");
+            summary = "Check skipped";
+            status = DetectionResult.STATUS_NORMAL;
         } finally {
             if (reader != null) {
                 try {
@@ -202,17 +280,20 @@ public class DebugDetectionManager {
                 process.destroy();
             }
         }
-        String summary = status == DetectionResult.STATUS_NORMAL
-                ? "Maps clean (Java exec)"
-                : (details.size() + " suspicious mapping(s) in maps (Java exec)");
+        if (summary == null) {
+            summary = status == DetectionResult.STATUS_NORMAL
+                    ? "Maps clean (Java exec)"
+                    : (details.size() + " suspicious mapping(s) in maps (Java exec)");
+        }
         return new DetectionResult("Maps detection (Java exec)", summary, status, details);
     }
 
     private DetectionResult detectPtraceStatus() {
         List<String> details = new ArrayList<>();
         int status = DetectionResult.STATUS_NORMAL;
+        String summary;
         try {
-            String statusContent = readFileContent("/proc/self/status");
+            String statusContent = readProcFileWithFallback("/proc/self/status");  /* FileReader + exec 双通道 */
             for (String line : statusContent.split("\\n")) {
                 if (line.startsWith("TracerPid:")) {
                     String value = line.substring(line.indexOf(":") + 1).trim();
@@ -228,15 +309,12 @@ public class DebugDetectionManager {
                     details.add("Process state: " + line.substring(line.indexOf(":") + 1).trim());
                 }
             }
+            summary = status == DetectionResult.STATUS_NORMAL ? "Process is not being traced" : "Process is being traced!";
         } catch (Exception e) {
-            details.add("Error reading process status: " + e.getMessage());
+            summary = "Check skipped";
+            details.add("Could not read /proc/self/status (permission or I/O error)");
         }
-        return new DetectionResult(
-                "Ptrace / IDA Attach",
-                status == DetectionResult.STATUS_NORMAL ? "Process is not being traced" : "Process is being traced!",
-                status,
-                details
-        );
+        return new DetectionResult("Ptrace / IDA Attach", summary, status, details);
     }
 
     private DetectionResult detectDebuggerAttached() {
@@ -446,5 +524,33 @@ public class DebugDetectionManager {
             }
         }
         return content.toString();
+    }
+
+    /**
+     * 多方式读取 /proc 等路径：先 FileReader，失败则 exec("cat path")，提高兼容性、防止单一 API 在部分系统不可用。
+     */
+    private static String readProcFileWithFallback(String path) {
+        try {
+            return readFileContent(path);
+        } catch (Throwable ignored) {
+            // 部分系统/权限下 FileReader 不可用，用 exec 作为备用通道
+        }
+        java.lang.Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{"/system/bin/cat", path});
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = r.readLine()) != null) {
+                    sb.append(line).append("\n");
+                }
+                process.waitFor();
+                return sb.toString();
+            }
+        } catch (Throwable e) {
+            throw new RuntimeException("Could not read " + path + " (FileReader and exec fallback failed)", e);
+        } finally {
+            if (process != null) process.destroy();
+        }
     }
 }

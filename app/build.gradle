@@ -2,6 +2,21 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+/** 从 release  keystore 读取签名证书 SHA-256（小写十六进制），用于防二次打包校验；失败或 Debug 构建返回空则 Native 跳过校验 */
+def getReleaseSignatureSha256() {
+    try {
+        def keystore = file("release.keystore")
+        if (!keystore.exists()) return ""
+        def proc = ["keytool", "-list", "-v", "-keystore", keystore.absolutePath, "-alias", "antifrida", "-storepass", "antifrida123"].execute()
+        proc.waitFor()
+        def line = proc.text.readLines().find { it != null && it.trim().startsWith("SHA256:") }
+        if (line != null) {
+            return line.replaceAll("SHA256:", "").replaceAll(":", "").replaceAll(/\s/, "").trim().toLowerCase()
+        }
+    } catch (Exception ignored) { }
+    return ""
+}
+
 android {
     namespace 'anti.rusda'
     compileSdk 36
@@ -45,6 +60,11 @@ android {
             signingConfig signingConfigs.release
             ndk {
                 debugSymbolLevel 'SYMBOL_TABLE'
+            }
+            externalNativeBuild {
+                cmake {
+                    arguments "-DEXPECTED_SIGNATURE_SHA256=" + getReleaseSignatureSha256()
+                }
             }
         }
         debug {
