@@ -18,6 +18,10 @@ static void detect_frida_processes(void);
 #define O_RDONLY     0
 
 #define CONNECT_TIMEOUT_SEC 2
+#define DBUS_PROBE_TIMEOUT_SEC 1
+#define MSG_DONTWAIT 0x40
+#define MAX_LISTEN_PORTS 16
+#define MAX_DBUS_DETAILS 4
 
 // Minimal sockaddr_in layout for kernel (network byte order)
 struct sockaddr_in_min {
@@ -107,8 +111,10 @@ static bool detect_frida_server_listening(void) {
     return false;
 }
 
-// 仅检测 Frida 默认端口 27042，不检测 5000/8080 等易误报端口
-static const int FRIDA_PORTS[] = { 27042, 0 };
+// Frida 默认端口 27042；IDA 动态调试 android_server 默认监听 23946（端口转发后 PC 端 IDA 连接）
+static const int FRIDA_PORT = 27042;
+static const int IDA_ANDROID_SERVER_PORT = 23946;
+static const int SUSPICIOUS_DEBUG_PORTS[] = { FRIDA_PORT, IDA_ANDROID_SERVER_PORT, 0 };
 
 // Last scan result for JNI to build DetectionResult (title/summary/details)
 #define MAX_OPEN_PORTS 8
@@ -118,6 +124,125 @@ static int s_open_port_count = 0;
 #define MAX_FRIDA_PROCESS_DETAILS 8
 static char s_frida_process_details[MAX_FRIDA_PROCESS_DETAILS][256];
 static int s_frida_process_count = 0;
+
+/* D-Bus AUTH 探测：frida-server 暴露 frida-core，发送 AUTH 会回 REJECT */
+static char s_dbus_details[MAX_DBUS_DETAILS][256];
+static int s_dbus_detail_count = 0;
+
+/* 从 /proc/net/tcp 解析 127.0.0.1 上 LISTEN(0A) 的端口，写入 ports[]，返回数量，最多 max_ports */
+static int parse_listen_ports_localhost(int *ports, int max_ports) {
+    int fd = my_open("/proc/net/tcp", O_RDONLY, 0);
+    if (fd < 0) return 0;
+    char buffer[4096];
+    ssize_t n = my_read(fd, buffer, sizeof(buffer) - 1);
+    my_close(fd);
+    if (n <= 0) return 0;
+    buffer[n] = '\0';
+
+    const char *needle_listen = " 0A ";
+    const char *needle_local = "0100007F:";  /* 127.0.0.1 */
+    int count = 0;
+    const char *line = buffer;
+    while (*line && count < max_ports) {
+        const char *eol = my_strstr(line, "\n");
+        const char *end = eol ? eol : (line + my_strlen(line));
+        if (end > line && my_strstr(line, needle_listen) != nullptr) {
+            const char *addr = my_strstr(line, needle_local);
+            if (addr != nullptr) {
+                addr += 9;  /* skip "0100007F:" */
+                int port_hex = 0;
+                while (*addr && *addr != ' ' && *addr != '\n') {
+                    int v = (*addr >= '0' && *addr <= '9') ? (*addr - '0') :
+                            (*addr >= 'A' && *addr <= 'F') ? (*addr - 'A' + 10) :
+                            (*addr >= 'a' && *addr <= 'f') ? (*addr - 'a' + 10) : -1;
+                    if (v < 0) break;
+                    port_hex = (port_hex << 4) | v;
+                    addr++;
+                }
+                if (port_hex > 0 && port_hex <= 65535) {
+                    /* /proc/net/tcp 端口为两字节十六进制，直接转十进制即端口号 */
+                    ports[count++] = port_hex;
+                }
+            }
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return count;
+}
+
+/* 对 127.0.0.1:port 发 D-Bus AUTH 探测；收到 REJECT 则高度疑似 frida-server */
+static bool probe_dbus_frida(int port) {
+    int sock = my_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) return false;
+
+    struct timeval_min {
+        long tv_sec;
+        long tv_usec;
+    } tv;
+    tv.tv_sec = DBUS_PROBE_TIMEOUT_SEC;
+    tv.tv_usec = 0;
+    my_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, (unsigned int)sizeof(tv));
+    my_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, (unsigned int)sizeof(tv));
+
+    struct sockaddr_in_min addr;
+    my_memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = host_to_net_short((unsigned short)port);
+    addr.sin_addr   = 0x0100007f;
+
+    if (my_connect(sock, &addr, (unsigned int)sizeof(addr)) != 0) {
+        my_close(sock);
+        return false;
+    }
+    const char auth_byte = '\x00';
+    const char auth_line[] = "AUTH\r\n";
+    if (my_send(sock, &auth_byte, 1, 0) != 1) {
+        my_close(sock);
+        return false;
+    }
+    if (my_send(sock, auth_line, 6, 0) != 6) {
+        my_close(sock);
+        return false;
+    }
+    char buf[16];
+    my_memset(buf, 0, sizeof(buf));
+    ssize_t nr = my_recv(sock, buf, 8, MSG_DONTWAIT);
+    my_close(sock);
+    if (nr < 6) return false;
+    if (my_strstr(buf, "REJECT") != nullptr) {
+        LOGD("D-Bus REJECT on 127.0.0.1:%d - frida-server suspected", port);
+        return true;
+    }
+    return false;
+}
+
+static void detect_dbus_frida_server(void) {
+    s_dbus_detail_count = 0;
+    int listen_ports[MAX_LISTEN_PORTS];
+    int n = parse_listen_ports_localhost(listen_ports, MAX_LISTEN_PORTS);
+    for (int i = 0; i < n && s_dbus_detail_count < MAX_DBUS_DETAILS; i++) {
+        int port = listen_ports[i];
+        if (port <= 0) continue;
+        if (probe_dbus_frida(port)) {
+            char *d = s_dbus_details[s_dbus_detail_count];
+            size_t pos = 0;
+            const char prefix[] = "D-Bus frida-server (REJECT) on 127.0.0.1:";
+            while (prefix[pos] && pos < 200) { d[pos] = prefix[pos]; pos++; }
+            /* port 转十进制字符串（无前导零） */
+            char port_buf[8];
+            int i = 0, p = port;
+            if (p == 0) port_buf[i++] = '0';
+            else {
+                unsigned int u = (unsigned int)p;
+                while (u && i < 7) { port_buf[i++] = (char)('0' + (u % 10)); u /= 10; }
+            }
+            while (i > 0 && pos < 254) d[pos++] = port_buf[--i];
+            d[pos] = '\0';
+            s_dbus_detail_count++;
+        }
+    }
+}
 
 bool is_port_open(int port) {
     int sock = my_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -147,15 +272,16 @@ bool detect_frida_ports(void) {
     s_open_port_count = 0;
     bool found = false;
 
-    for (int i = 0; FRIDA_PORTS[i] != 0 && s_open_port_count < MAX_OPEN_PORTS; i++) {
-        if (is_port_open(FRIDA_PORTS[i])) {
-            LOGD("Suspicious port detected: %d", FRIDA_PORTS[i]);
-            s_open_ports[s_open_port_count++] = FRIDA_PORTS[i];
+    for (int i = 0; SUSPICIOUS_DEBUG_PORTS[i] != 0 && s_open_port_count < MAX_OPEN_PORTS; i++) {
+        int port = SUSPICIOUS_DEBUG_PORTS[i];
+        if (is_port_open(port)) {
+            LOGD("Suspicious port detected: %d", port);
+            s_open_ports[s_open_port_count++] = port;
             found = true;
         }
     }
 
-    /* 系统 net/tcp 中 LISTEN(0A) 行的 Frida 端口 27042(0x699A)；边界匹配 ":699A " 避免误报 */
+    /* 系统 net/tcp 中 LISTEN(0A) 行：Frida 27042(0x699A)、IDA android_server 23946(0x5D8A)；边界匹配 ":699A "/":5D8A " 避免误报 */
     const char *net_tcp_path = "/proc/net/tcp";
     int fd = my_open(net_tcp_path, O_RDONLY, 0);
     if (fd >= 0) {
@@ -167,16 +293,19 @@ bool detect_frida_ports(void) {
             const char *line = buffer;
             while (*line) {
                 const char *eol = my_strstr(line, "\n");
-                const char *end = eol ? eol : (line + my_strlen(line));
-                if (end > line && my_strstr(line, " 0A ") != nullptr && my_strstr(line, ":699A ") != nullptr) {
-                    int j;
-                    for (j = 0; j < s_open_port_count; j++) if (s_open_ports[j] == 27042) break;
-                    if (j >= s_open_port_count) {
-                        s_open_ports[s_open_port_count++] = 27042;
-                        LOGD("Frida port 27042 (LISTEN) in %s", net_tcp_path);
-                        found = true;
+                if (eol && eol > line && my_strstr(line, " 0A ") != nullptr) {
+                    int add_port = -1;
+                    if (my_strstr(line, ":699A ") != nullptr) add_port = 27042;
+                    else if (my_strstr(line, ":5D8A ") != nullptr) add_port = 23946;
+                    if (add_port > 0) {
+                        int j;
+                        for (j = 0; j < s_open_port_count; j++) if (s_open_ports[j] == add_port) break;
+                        if (j >= s_open_port_count) {
+                            s_open_ports[s_open_port_count++] = add_port;
+                            LOGD("Port %d (LISTEN) in %s", add_port, net_tcp_path);
+                            found = true;
+                        }
                     }
-                    break; /* 只检测 27042，找到即可 */
                 }
                 if (!eol) break;
                 line = eol + 1;
@@ -194,7 +323,20 @@ bool detect_frida_ports(void) {
     detect_frida_processes();
     if (s_frida_process_count > 0) found = true;
 
+    /* D-Bus AUTH 探测：对 127.0.0.1 上 LISTEN 端口发 AUTH，收到 REJECT 则疑似 frida-server */
+    detect_dbus_frida_server();
+    if (s_dbus_detail_count > 0) found = true;
+
     return found;
+}
+
+int get_frida_dbus_detail_count(void) {
+    return s_dbus_detail_count;
+}
+
+const char *get_frida_dbus_detail_at(int index) {
+    if (index < 0 || index >= s_dbus_detail_count) return nullptr;
+    return s_dbus_details[index];
 }
 
 // Frida 进程名关键词：re.frida 匹配 re.frida.helper/re.frida.server（comm 最长 15 字符）；frida-server 独立匹配

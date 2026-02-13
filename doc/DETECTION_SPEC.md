@@ -57,21 +57,21 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 
 | 属性     | 说明 |
 |----------|------|
-| **目的** | 检测 Frida 默认监听端口、Frida Server 进程及 Frida 相关进程（如 `re.frida.helper`），防止 Frida 远程附加或注入 |
+| **目的** | 检测 Frida 默认监听端口、**IDA 动态调试 android_server 默认端口 23946**、Frida Server 进程、Frida 相关进程（如 `re.frida.helper`）及 **D-Bus frida-server 特征**，防止 Frida 远程附加、IDA 动态调试或注入 |
 | **实现层** | Native（C++，`port_scanner.cpp`） |
-| **实现** | 1) 使用 **syscall**（`my_socket`/`my_connect`）连接本地 `127.0.0.1` 端口 **27042**（仅检测此端口）；2) 读取 **`/proc/net/tcp`**（系统级 TCP 表），仅匹配状态 **0A(LISTEN)** 行中本地端口为 `:699A`（27042，边界匹配）；3) **Frida 16+ 随机端口**：遍历 `/proc/<pid>/comm`，若进程名包含 `frida-server`，则读取该进程的 `/proc/<pid>/net/tcp`，若存在状态 `0A`（LISTEN），判为 Frida Server 监听（覆盖 `-l 0.0.0.0:0` 随机端口场景）；4) **Frida 进程扫描**：遍历 `/proc/<pid>/comm`，若进程名包含 `re.frida`（匹配 `re.frida.helper`、`re.frida.server` 等）或 `frida-server`，判为 Frida 进程存在（Frida 运行时会留下如 `re.frida.helper` 进程） |
-| **状态** | 任意经典端口可连接、net/tcp 发现经典端口、frida-server 进程存在 LISTEN 套接字、或发现 Frida 相关进程（如 re.frida.helper）→ `DANGER`；否则 `NORMAL` |
-| **设计说明** | 使用 syscall 绕过 libc；仅检测默认端口 27042（不检测 5000/8080 等易误报端口）；通过进程名 + net/tcp 覆盖 Frida 16+ 随机端口；Frida 进程扫描覆盖 gadget 注入时产生的 `re.frida.helper` 等进程 |
+| **实现** | 1) 使用 **syscall**（`my_socket`/`my_connect`）连接本地 `127.0.0.1` 端口 **27042**（Frida）、**23946**（IDA android_server，端口转发后 PC 端 IDA 连接）；2) 读取 **`/proc/net/tcp`**，匹配状态 **0A(LISTEN)** 行中本地端口 `:699A`（27042）或 `:5D8A`（23946）；3) **Frida 16+ 随机端口**：遍历 `/proc/<pid>/comm`，若进程名包含 `frida-server`，则读该进程 `/proc/<pid>/net/tcp`，若存在 `0A`（LISTEN）判为 Frida Server 监听；4) **Frida 进程扫描**：遍历 `/proc/<pid>/comm`，匹配 `re.frida`/`frida-server`；5) **D-Bus AUTH 探测**：从 `/proc/net/tcp` 解析 127.0.0.1 上所有 LISTEN 端口，对每个端口短超时 connect 后发送 `\x00` + `AUTH\r\n`，若 recv 到 **REJECT** 则高度疑似 frida-server；使用 `my_send`/`my_recv` syscall，端口数上限与超时控制启动延迟 |
+| **状态** | 任一可疑端口可连接、net/tcp 发现 27042/23946、frida-server 进程 LISTEN、发现 Frida 进程、或 **D-Bus REJECT 响应** → `DANGER`；否则 `NORMAL` |
+| **设计说明** | 使用 syscall 绕过 libc；IDA android_server 常用 23946，检测本机该端口监听/可连接为常见反调试做法；D-Bus 探测作为中等置信度信号与端口/进程信号叠加；仅连 127.0.0.1、短超时，先筛 LISTEN 端口再探测以降低耗时 |
 
 ### 2.3 Memory Signatures
 
 | 属性     | 说明 |
 |----------|------|
-| **目的** | 检测进程内存映射中是否存在 Frida/LSPosed 相关库或字符串；**增强**：匿名可执行内存（LSPosed 隐藏 so 时仍保留可执行权限） |
+| **目的** | 检测进程内存映射中是否存在 Frida/LSPosed 相关库或字符串；**增强**：匿名可执行内存、**QuickJS/frida-java-bridge/linjector**（OWASP MASTG：Frida 当前用 QuickJS，frida-java-bridge 等） |
 | **实现层** | Native（C++，`memory_scanner.cpp`） |
-| **实现** | 1) **签名匹配**：使用 syscall `my_open`/`my_read` 读取 `/proc/self/maps`，逐行匹配 `frida`、`FRIDA`、`gum-js`、`gobject`、`gmain`、`frida-agent`、`frida-gadget`、`frida-server`、`liblspd.so`、`libriru.so`、`libriruloader.so`、`libxposed`、`org.lsposed`、**zygisk_lsposed**、**zygisk**（覆盖 maps 中 `/data/adb/modules/zygisk_lsposed/zygisk/arm64-v8a.so`）等；2) **匿名可执行内存**：解析 maps 行，识别匿名路径（排除 [vdso]/[vvar]/[stack]/[heap]）+ 可执行权限 + 大小 ≥128KB 的映射，最多报告 2 条，用于发现 LSPosed 等隐藏 so 后仍保留的可执行代码 |
+| **实现** | 1) **签名匹配**：使用 syscall 读 `/proc/self/maps`，逐行匹配 `frida`、`FRIDA`、`gum-js`、`gumjs`、`gobject`、`gmain`、`frida-agent`、`frida-gadget`、`frida-server`、**`frida-java-bridge`**、**`linjector`**、**`QuickJS`/`quickjs`/`libquickjs`**、`liblspd.so`、`libriru.so`、`libxposed`、`org.lsposed`、**zygisk_lsposed**、**zygisk** 等；2) **匿名可执行内存**：解析 maps 行，匿名路径（排除 [vdso]/[vvar]/[stack]/[heap]）+ 可执行 + 大小 ≥128KB，最多 2 条 |
 | **状态** | 发现任一签名或可疑匿名可执行内存 → `DANGER`；未发现 → `NORMAL` |
-| **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；匿名可执行内存检测阈值 default 128KB 降低 JIT 误报；**设置 → 高级检测** 开启后阈值降至 4KB，可发现更小匿名可执行区（可能增加误报） |
+| **设计说明** | 通过 syscall 与自实现字符串函数减少 inline hook 风险；QuickJS/engine 存在最好与端口/Frida 痕迹联合判定以降低误报（部分 App 自带 JS 引擎）；**设置 → 高级检测** 下匿名可执行阈值 4KB |
 
 ### 2.4 Maps 二次检测 (Java exec)
 
@@ -107,7 +107,7 @@ Sentry 提供 **17 项** 安全检测，分为两类：
 |----------|------|
 | **目的** | 检测 Xposed/LSPosed/EdXposed 框架及内联/PLT Hook、特征路径与注入 fd |
 | **实现层** | Java + Native（`hook_detector.cpp`、`xposed_detector.cpp`、`memory_scanner.cpp`）；入口方法名 `checkLibraryIntegrity(Context)` |
-| **实现** | 1) **Java**（检测**当前进程**是否被 hook，非「应用安装」）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `XposedHelpers`/`XposedBridge` 的 `findAndHookMethod`、`hookAllMethods` 等关键方法；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed`，尝试加载 `org.lsposed.lspd.core.Main`，检查 parent 链含 Xposed/Lsp（需绕过 Hidden API）。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：检测 Xposed 路径、**LSPosed 路径**（`/data/adb/lspd`、`/data/adb/modules/zygisk_lsposed`）、**Riru 路径**、**ro.dalvik.vm.native.bridge** 可疑值、**Zygisk fexecve**（`/proc/self/exe` 为 `/dev/fd/X`）、**LD_PRELOAD/MAGISKTMP** 环境变量、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：`/proc/self/maps` 中匹配 `libxposed`、`XposedBridge`、`XposedHelpers`、`org.lsposed`、`zygisk_lsposed`、`zygisk` 等签名；⑦ 内联 Hook、PLT/GOT、libc 完整性（`hook_detector.cpp`）；⑧ **LR 寄存器检测**（`hook_detector.cpp`，ARM64）：在 `detect_hooks()` 入口读取 LR(x30)，若返回地址不在本模块（libantidebug.so）范围内则判为 trampoline 式 inline hook（Frida/Dobby/xhook 等），使用 syscall 解析 `/proc/self/maps` 获取模块边界。 |
+| **实现** | 1) **Java**（检测**当前进程**是否被 hook）：① `Class.forName("de.robv.android.xposed.XposedBridge")`；② **堆栈检测**：自造异常，检查堆栈中是否包含 `XposedBridge`/`XposedHelpers`/`org.lsposed`；③ **反射检测**：反射查找 `findAndHookMethod`、`hookAllMethods` 等；④ **ClassLoader 实例检测**：`VMDebug.getInstancesOfClasses` 遍历 ClassLoader，检查 `InMemoryClassLoader`、`LspModuleClassLoader`、`XposedBridge`、`EdXposed` 等。2) **Native**：⑤ **特征路径与 fd**（`xposed_detector.cpp`，syscall）：Xposed/LSPosed/Riru 路径、Zygisk fexecve、LD_PRELOAD/MAGISKTMP、`/proc/self/fd` 中 `linjector`/`lsposed`/`riru`；⑥ **内存映射**（`memory_scanner.cpp`）：maps 中匹配 libxposed、org.lsposed、zygisk 等；⑦ **内联 Hook / 完整性**（`hook_detector.cpp`）：**ARM64 LDR+BR 序言检测**（Frida Interceptor 典型 LDR X16/X17 [PC]; BR X16/X17）、无条件 B 跳转、PLT/GOT（malloc 不在 libc）、**libc 完整性**（用 **syscall** `my_open`/`my_close` 打开 `/system/lib64/libc.so` 或 `/system/lib/libc.so`，避免 open 被 hook 后误判）；⑧ **LR 寄存器检测**（ARM64）：`detect_hooks()` 入口读 LR(x30)，若返回地址不在本模块则判为 trampoline 式 inline hook，用 syscall 解析 `/proc/self/maps` 取模块边界。 |
 | **状态** | 任意一项命中 → `DANGER`；否则 `NORMAL` |
 
 ### 2.8 Dirty Page / Memory Injection（脏页/内存注入）
@@ -536,22 +536,24 @@ check_anon_exec_memory(line, s_findings, MAX_MEMORY_FINDINGS, &s_finding_count, 
 
 - 通过 `Runtime.getRuntime().exec("cat /proc/" + Process.myPid() + "/maps")` 读取 maps，`BufferedReader` 逐行与 `MAPS_SUSPICIOUS_SIGNATURES` 做不区分大小写匹配，与 Native 签名列表一致，形成双通道检测。
 
-### 12.5 Native 层：Frida 端口、frida-server 进程与 Frida 进程扫描
+### 12.5 Native 层：Frida 端口、frida-server 进程、Frida 进程与 D-Bus AUTH 探测
 
 **文件**：`app/src/main/cpp/detector/port_scanner.cpp`
 
-- 仅检测端口 **27042**：`my_socket`/`my_connect` 连接 127.0.0.1:27042；并读 **`/proc/net/tcp`**，逐行仅匹配状态 **0A(LISTEN)** 且本地端口为 `:699A `（边界匹配）。
-- Frida 16+ 随机端口：遍历 `/proc/<pid>/comm` 找进程名含 `frida-server`，再读该进程 `/proc/<pid>/net/tcp`，若存在 ` 0A `（LISTEN）则判为 Frida Server 监听。
-- **Frida 进程扫描**：`detect_frida_processes()` 遍历 `/proc/<pid>/comm`，若进程名包含 `re.frida`（匹配 `re.frida.helper`、`re.frida.server` 等）或 `frida-server`，记录详情（若 frida-server 已由 LISTEN 检测报告则不再重复）。
+- 仅检测端口 **27042**：`my_socket`/`my_connect` 连接 127.0.0.1:27042；并读 **`/proc/net/tcp`**，仅匹配 LISTEN(0A) 且本地端口 `:699A`。
+- Frida 16+ 随机端口：遍历 `/proc/<pid>/comm` 找 `frida-server`，再读该进程 `/proc/<pid>/net/tcp`，若存在 LISTEN 则判为 Frida Server 监听。
+- **Frida 进程扫描**：`detect_frida_processes()` 遍历 `/proc/<pid>/comm`，匹配 `re.frida`/`frida-server`。
+- **D-Bus AUTH 探测**：`parse_listen_ports_localhost()` 从 `/proc/net/tcp` 解析 127.0.0.1 上所有 LISTEN 端口；`probe_dbus_frida(port)` 对每个端口短超时 connect 后 `my_send("\x00", 1)`、`my_send("AUTH\r\n", 6)`，`my_recv()` 若收到 **REJECT** 则判为 frida-server（frida-core 暴露 D-Bus 的典型响应）；结果通过 `get_frida_dbus_detail_count()`/`get_frida_dbus_detail_at()` 返回，JNI 将端口详情、进程详情与 D-Bus 详情一并返回。
 
 ```cpp
 // 1) connect 检测 27042
-// 2) 读 /proc/net/tcp，仅 LISTEN(0A) 行且本地端口 :699A 边界匹配
+// 2) 读 /proc/net/tcp，LISTEN(0A) 且 :699A
 // 3) detect_frida_server_listening() → frida-server 进程 + LISTEN
-// 4) detect_frida_processes() → re.frida.helper、re.frida.server 等进程
+// 4) detect_frida_processes() → re.frida.helper、re.frida.server
+// 5) detect_dbus_frida_server() → 对 127.0.0.1 LISTEN 端口发 AUTH，收 REJECT 则命中
 bool detect_frida_ports(void) {
     ...
-    detect_frida_processes();  // 扫描 /proc/*/comm 检测 Frida 进程
+    detect_dbus_frida_server();
     return found;
 }
 ```
@@ -670,7 +672,7 @@ return new DetectionResult("ADB Debug", summary, status, 5, details, true);  // 
 
 **文件**：`app/src/main/cpp/utils/syscall_utils.h` / `syscall_utils.cpp`
 
-- 提供：`my_open`、`my_read`、`my_close`、`my_lseek`、`my_access`、`my_socket`、`my_connect`、`my_strstr`、`my_strcasestr`、`my_strcmp` 等，内部使用架构对应 syscall 号（如 `__NR_openat`、`__NR_read`、`__NR_lseek`），避免经过 libc 从而降低被 Frida/Xposed Hook 的概率。
+- 提供：`my_open`、`my_read`、`my_close`、`my_lseek`、`my_access`、`my_socket`、`my_connect`、**`my_send`**、**`my_recv`**（用于 D-Bus AUTH 探测）、`my_setsockopt`、`my_strstr`、`my_strcasestr`、`my_strcmp` 等，内部使用架构对应 syscall 号，避免经过 libc 从而降低被 Frida/Xposed Hook 的概率。
 
 ---
 

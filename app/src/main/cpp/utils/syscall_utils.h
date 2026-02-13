@@ -17,10 +17,12 @@ int my_close(int fd);
 int my_access(const char *pathname, int mode);
 ssize_t my_lseek(int fd, off_t offset, int whence);
 
-// Socket syscalls (bypass libc hooks for connect/socket/close)
+// Socket syscalls (bypass libc hooks for connect/socket/close/send/recv)
 int my_socket(int domain, int type, int protocol);
 int my_connect(int sockfd, const void *addr, unsigned int addrlen);
 int my_setsockopt(int sockfd, int level, int optname, const void *optval, unsigned int optlen);
+ssize_t my_send(int sockfd, const void *buf, size_t len, int flags);
+ssize_t my_recv(int sockfd, void *buf, size_t len, int flags);
 
 // String operations
 char *my_strcpy(char *dest, const char *src);

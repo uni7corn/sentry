@@ -10,6 +10,10 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#ifndef O_RDONLY
+#define O_RDONLY 0
+#endif
+
 #define LOG_TAG "SentryTag"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
@@ -101,7 +105,7 @@ static bool is_lr_suspicious(uint64_t lr) {
 }
 #endif
 
-// Check for inline hooks by verifying function prologue
+// Check for inline hooks by verifying function prologue (Frida Interceptor 典型为 LDR+BR 序言)
 static bool check_function_hooked(void *func_addr) {
     if (func_addr == nullptr) {
         return false;
@@ -109,34 +113,43 @@ static bool check_function_hooked(void *func_addr) {
 
     unsigned char *bytes = (unsigned char *)func_addr;
 
-    // Check for ARM/ARM64 hook patterns
-    // Common hook prologues:
-    // - Branch to hook (B/BX/BL)
-    // - LDR PC, [PC, #offset]
-    // - MOV PC, Rm
-
-    // Check for ARM64 branch
-    if (bytes[0] == 0x00 || bytes[0] == 0x01 || bytes[0] == 0x02 || bytes[0] == 0x03) {
-        // Potential branch instruction
-        if ((bytes[3] & 0xFC) == 0x14) {
-            LOGD("Potential inline hook detected (ARM64 branch)");
+#if defined(__aarch64__)
+    // ARM64: Frida/Dobby 常见 LDR X16/X17, [PC, #0]; BR X16/X17（长跳转序言）
+    // LDR X16, [PC, #0]  little-endian: 58 00 00 50
+    // BR X16              little-endian: 00 02 1F D6
+    // BR X17              little-endian: 20 02 1F D6
+    if (bytes[0] == 0x58 && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0x50) {
+        if ((bytes[4] == 0x00 && bytes[5] == 0x02 && bytes[6] == 0x1F && bytes[7] == 0xD6) ||
+            (bytes[4] == 0x20 && bytes[5] == 0x02 && bytes[6] == 0x1F && bytes[7] == 0xD6)) {
+            LOGD("Potential inline hook detected (ARM64 LDR+BR trampoline)");
             return true;
         }
     }
-
-    // Check for ARM32 hook patterns
+    if (bytes[0] == 0x59 && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0x50) {
+        if ((bytes[4] == 0x20 && bytes[5] == 0x02 && bytes[6] == 0x1F && bytes[7] == 0xD6) ||
+            (bytes[4] == 0x00 && bytes[5] == 0x02 && bytes[6] == 0x1F && bytes[7] == 0xD6)) {
+            LOGD("Potential inline hook detected (ARM64 LDR+BR trampoline)");
+            return true;
+        }
+    }
+    // ARM64 无条件 B 跳转（0x14 为 B 的 opcode 高 bits）
+    if ((bytes[3] & 0xFC) == 0x14 && (bytes[0] | bytes[1] | bytes[2]) != 0) {
+        LOGD("Potential inline hook detected (ARM64 branch)");
+        return true;
+    }
+#elif defined(__arm__)
+    // ARM32: B (unconditional branch) 0xEA
     if (bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0xEA) {
-        // B (unconditional branch)
         LOGD("Potential inline hook detected (ARM32 branch)");
         return true;
     }
-
-    // Check for LDR PC pattern
     if (bytes[3] == 0xE5 && bytes[2] == 0x9F && bytes[1] == 0xF0) {
         LOGD("Potential inline hook detected (LDR PC)");
         return true;
     }
-
+#else
+    (void)bytes;
+#endif
     return false;
 }
 
@@ -195,9 +208,9 @@ bool check_plt_hooks(void) {
     if (malloc_addr && dladdr(malloc_addr, &info)) {
         LOGD("malloc found in: %s", info.dli_fname ? info.dli_fname : "unknown");
 
-        // If malloc is not in libc, it might be hooked
-        if (info.dli_fname && strstr(info.dli_fname, "libc.so") == nullptr &&
-            strstr(info.dli_fname, "libc++.so") == nullptr) {
+        // If malloc is not in libc, it might be hooked（使用 my_strstr 降低 hook 影响）
+        if (info.dli_fname && my_strstr(info.dli_fname, "libc.so") == nullptr &&
+            my_strstr(info.dli_fname, "libc++.so") == nullptr) {
             LOGD("malloc not in libc - possible PLT hook");
             return true;
         }
@@ -206,22 +219,17 @@ bool check_plt_hooks(void) {
     return false;
 }
 
+// 使用 syscall 打开/读取 libc，避免 libc 的 open/close 被 hook 后误判
 bool check_library_integrity(void) {
-    // Check if critical libraries have been tampered with
-    // This involves comparing memory sections with on-disk files
-
-    // For now, just check if libc can be opened normally
-    int fd = open("/system/lib64/libc.so", O_RDONLY);
+    int fd = my_open("/system/lib64/libc.so", O_RDONLY, 0);
     if (fd < 0) {
-        fd = open("/system/lib/libc.so", O_RDONLY);
+        fd = my_open("/system/lib/libc.so", O_RDONLY, 0);
     }
-
     if (fd < 0) {
-        LOGD("Cannot open libc - possible tampering");
+        LOGD("Cannot open libc (syscall) - possible tampering or path");
         return true;
     }
-
-    close(fd);
+    my_close(fd);
     return false;
 }
 

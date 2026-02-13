@@ -142,10 +142,11 @@ public class DebugDetectionManager {
         return result;
     }
 
-    /** 与 Native memory_scanner 一致的 maps 可疑模块签名（小写，做不区分大小写匹配） */
+    /** 与 Native memory_scanner 一致的 maps 可疑模块签名（小写，做不区分大小写匹配）；含 QuickJS/frida-java-bridge/linjector */
     private static final String[] MAPS_SUSPICIOUS_SIGNATURES = {
             "frida", "gum-js", "gumjs", "gthread", "gobject", "gmain", "gdbus",
-            "frida-agent", "frida-gadget", "frida-server",
+            "frida-agent", "frida-gadget", "frida-server", "frida-java-bridge", "linjector",
+            "quickjs", "libquickjs",
             "liblspd.so", "libriru.so", "libriruloader.so",
             "libxposed", "xposed_art", "xposed_bridge", "xposedbridge", "xposedhelpers",
             "xposed.installer", "xposedbridge.jar", "de.robv.android.xposed",

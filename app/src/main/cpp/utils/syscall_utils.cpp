@@ -10,6 +10,8 @@
 #define __NR_socket   198
 #define __NR_connect  203
 #define __NR_setsockopt 208
+#define __NR_sendto   206
+#define __NR_recvfrom 207
 #endif
 #ifndef __NR_lseek
 #define __NR_lseek    62
@@ -143,7 +145,20 @@ int my_connect(int sockfd, const void *addr, unsigned int addrlen) {
 int my_setsockopt(int sockfd, int level, int optname, const void *optval, unsigned int optlen) {
     return (int) do_syscall(__NR_setsockopt, sockfd, level, optname, (long)optval, optlen, 0);
 }
+#endif
+#if defined(__NR_sendto) && defined(__NR_recvfrom)
+/* Stream send/recv via sendto/recvfrom with null address (bypass libc for D-Bus probe) */
+ssize_t my_send(int sockfd, const void *buf, size_t len, int flags) {
+    return (ssize_t) do_syscall(__NR_sendto, sockfd, (long)buf, len, flags, 0, 0);
+}
+ssize_t my_recv(int sockfd, void *buf, size_t len, int flags) {
+    return (ssize_t) do_syscall(__NR_recvfrom, sockfd, (long)buf, len, flags, 0, 0);
+}
 #else
+ssize_t my_send(int sockfd, const void *buf, size_t len, int flags) { (void)sockfd;(void)buf;(void)len;(void)flags; return -1; }
+ssize_t my_recv(int sockfd, void *buf, size_t len, int flags) { (void)sockfd;(void)buf;(void)len;(void)flags; return -1; }
+#endif
+#if !defined(__NR_socket) || !defined(__NR_connect) || !defined(__NR_setsockopt)
 int my_socket(int domain, int type, int protocol) { (void)domain;(void)type;(void)protocol; return -1; }
 int my_connect(int sockfd, const void *addr, unsigned int addrlen) { (void)sockfd;(void)addr;(void)addrlen; return -1; }
 int my_setsockopt(int sockfd, int level, int optname, const void *optval, unsigned int optlen) { (void)sockfd;(void)level;(void)optname;(void)optval;(void)optlen; return -1; }

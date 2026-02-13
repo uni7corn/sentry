@@ -109,7 +109,8 @@ Java_anti_rusda_detector_DebugDetectionManager_nativeGetFridaPortScanResult(JNIE
     detect_frida_ports();
     int portCount = get_frida_port_open_count();
     int processCount = get_frida_process_detail_count();
-    int n = portCount + processCount;
+    int dbusCount = get_frida_dbus_detail_count();
+    int n = portCount + processCount + dbusCount;
     int status = (n > 0) ? 2 : 0;  // 2 = DANGER, 0 = NORMAL
     jclass stringClass = env->FindClass("java/lang/String");
     if (!stringClass) return nullptr;
@@ -117,17 +118,19 @@ Java_anti_rusda_detector_DebugDetectionManager_nativeGetFridaPortScanResult(JNIE
     jobjectArray arr = env->NewObjectArray(arrLen, stringClass, nullptr);
     if (!arr) return nullptr;
     env->SetObjectArrayElement(arr, 0, env->NewStringUTF(status == 2 ? "2" : "0"));
-    env->SetObjectArrayElement(arr, 1, env->NewStringUTF(n > 0 ? "Frida port(s) or process(es) detected" : "No Frida ports or processes detected"));
+    env->SetObjectArrayElement(arr, 1, env->NewStringUTF(n > 0 ? "Frida/IDA port(s) or Frida process(es) or D-Bus detected" : "No Frida/IDA ports or Frida processes detected"));
     if (n == 0) {
-        env->SetObjectArrayElement(arr, 2, env->NewStringUTF("All Frida default ports closed, no Frida processes"));
+        env->SetObjectArrayElement(arr, 2, env->NewStringUTF("All Frida/IDA default ports closed, no Frida processes"));
     } else {
         int idx = 0;
         for (int i = 0; i < portCount; i++) {
             int port = get_frida_port_open_at(i);
             const char *detail;
-            char buf[64];
+            char buf[80];
             if (port == 0) {
                 detail = "frida-server process with listening TCP (Frida 16+ random port)";
+            } else if (port == 23946) {
+                detail = "Port 23946 is open (IDA android_server)";
             } else {
                 snprintf(buf, sizeof(buf), "Port %d is open (Frida default)", port);
                 detail = buf;
@@ -136,6 +139,10 @@ Java_anti_rusda_detector_DebugDetectionManager_nativeGetFridaPortScanResult(JNIE
         }
         for (int i = 0; i < processCount; i++) {
             const char *detail = get_frida_process_detail_at(i);
+            if (detail) env->SetObjectArrayElement(arr, 2 + idx++, env->NewStringUTF(detail));
+        }
+        for (int i = 0; i < dbusCount; i++) {
+            const char *detail = get_frida_dbus_detail_at(i);
             if (detail) env->SetObjectArrayElement(arr, 2 + idx++, env->NewStringUTF(detail));
         }
     }

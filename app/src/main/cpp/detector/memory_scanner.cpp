@@ -11,7 +11,8 @@
 #define LOG_TAG "SentryTag"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
-// Frida + LSPosed + Xposed + Riru + Zygisk memory signatures (use syscall to bypass libc hook)
+// Frida + LSPosed + Xposed + Riru + Zygisk + JS 引擎 memory signatures (use syscall to bypass libc hook)
+// 含 QuickJS/frida-java-bridge/linjector（OWASP MASTG：Frida 当前用 QuickJS，frida-java-bridge 等）
 static const char *FRIDA_SIGNATURES[] = {
     "frida",
     "FRIDA",
@@ -24,6 +25,11 @@ static const char *FRIDA_SIGNATURES[] = {
     "frida-agent",
     "frida-gadget",
     "frida-server",
+    "frida-java-bridge",
+    "linjector",
+    "QuickJS",
+    "quickjs",
+    "libquickjs",
     "liblspd.so",
     "libriru.so",
     "libriruloader.so",
