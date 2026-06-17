@@ -23,68 +23,103 @@ static int hex_val(char c) {
     return -1;
 }
 
+/* 解析单行 maps 文本（不含换行），写入 entry。返回 1=可执行段、0=非可执行、-1=parse 失败 */
+static int parse_one_maps_line(const char *line, struct { uint64_t start; uint64_t end; } *entry) {
+    uint64_t start = 0, end = 0;
+    char perms[8] = {0};
+    const char *p = line;
+    while (*p && *p != '-') {
+        int v = hex_val(*p);
+        if (v < 0) return -1;
+        start = (start << 4) | (unsigned)v;
+        p++;
+    }
+    if (*p != '-') return -1;
+    p++;
+    while (*p && *p != ' ') {
+        int v = hex_val(*p);
+        if (v < 0) return -1;
+        end = (end << 4) | (unsigned)v;
+        p++;
+    }
+    while (*p == ' ') p++;
+    for (int i = 0; i < 4 && *p && *p != ' '; i++) { perms[i] = *p; p++; }
+    int exec = 0;
+    for (int j = 0; j < 4 && perms[j]; j++) if (perms[j] == 'x') { exec = 1; break; }
+    entry->start = start;
+    entry->end = end;
+    return exec ? 1 : 0;
+}
+
+/* 历史问题：旧实现用 256KB 一次性缓冲。一个常见 App 进程的 /proc/self/maps 现在
+ * 经常 > 1MB（apex、art、所有 NDK 库、JIT 段、各种 anon），超出部分被截断 →
+ * 落在后段的合法 entry_point 会被判为 "outside libart" 产生误报。
+ *
+ * 改为分块读 + 流式行解析：内存用量恒定（4KB IO + 512 字节行缓冲），不再受
+ * maps 总长限制，可执行段数仍受 MAX_MAPS_RANGES（256）兜底以防 OOB。 */
 static void parse_maps_exec_ranges(void) {
     s_exec_count = 0;
     int used_syscall = 0;
-    int fd = open_with_fallback("/proc/self/maps", 0, 0, &used_syscall);  /* 先 syscall 再 libc，兼容多系统 */
+    int fd = open_with_fallback("/proc/self/maps", 0, 0, &used_syscall);
     if (fd < 0) {
         LOGD("[ArtMethod] maps open failed (syscall and libc fallback)");
         return;
     }
 
-    char buf[262144];  /* 256KB，与 SO 一致 */
-    size_t n = 0;
-    while (n < sizeof(buf) - 1) {
-        ssize_t r = read_with_fallback(fd, buf + n, sizeof(buf) - 1 - n, used_syscall);
-        if (r <= 0) break;
-        n += (size_t)r;
+    char io_buf[4096];
+    char line_buf[512];
+    size_t line_pos = 0;
+    size_t total_bytes = 0;
+    ssize_t rd;
+
+    while ((rd = read_with_fallback(fd, io_buf, sizeof(io_buf), used_syscall)) > 0
+           && s_exec_count < MAX_MAPS_RANGES) {
+        total_bytes += (size_t)rd;
+        for (ssize_t i = 0; i < rd && s_exec_count < MAX_MAPS_RANGES; i++) {
+            char c = io_buf[i];
+            if (c == '\n' || line_pos >= sizeof(line_buf) - 1) {
+                line_buf[line_pos] = '\0';
+                if (line_pos > 0) {
+                    struct { uint64_t start; uint64_t end; } e;
+                    if (parse_one_maps_line(line_buf, &e) == 1) {
+                        s_exec_ranges[s_exec_count].start = e.start;
+                        s_exec_ranges[s_exec_count].end = e.end;
+                        s_exec_count++;
+                    }
+                }
+                line_pos = 0;
+                if (c != '\n') {
+                    /* 行被截断（极长 pathname），跳过直到换行 */
+                    while (i < rd && io_buf[i] != '\n') i++;
+                }
+            } else {
+                line_buf[line_pos++] = c;
+            }
+        }
     }
-    my_close(fd);
-    if (n == 0) return;
-    buf[n] = '\0';
-    LOGD("[ArtMethod] maps read %zu bytes", n);
-
-    const char *p = buf;
-    while (*p && s_exec_count < MAX_MAPS_RANGES) {
-        uint64_t start = 0, end = 0;
-        char perms[8] = {0};
-        const char *path = nullptr;
-        while (*p && *p != '-') {
-            int v = hex_val(*p);
-            if (v >= 0) start = (start << 4) | (unsigned)v;
-            p++;
-        }
-        if (*p != '-') { p = my_strstr(p, "\n"); p = p ? p + 1 : buf + n; continue; }
-        p++;
-        while (*p && *p != ' ') {
-            int v = hex_val(*p);
-            if (v >= 0) end = (end << 4) | (unsigned)v;
-            p++;
-        }
-        while (*p == ' ') p++;
-        for (int i = 0; i < 4 && *p && *p != ' '; i++) { perms[i] = *p; p++; }
-        while (*p && *p != '\n') {
-            while (*p == ' ') p++;
-            if (*p && *p != '\n') path = p;
-            while (*p && *p != ' ' && *p != '\n') p++;
-        }
-        if (*p == '\n') p++;
-
-        int exec = 0;
-        for (int j = 0; j < 4 && perms[j]; j++) if (perms[j] == 'x') { exec = 1; break; }
-        if (exec) {  /* 纳入所有可执行映射，减少误报（oat/jit/apex 等） */
-            s_exec_ranges[s_exec_count].start = start;
-            s_exec_ranges[s_exec_count].end = end;
+    /* 文件末尾无换行的最后一行 */
+    if (line_pos > 0 && s_exec_count < MAX_MAPS_RANGES) {
+        line_buf[line_pos] = '\0';
+        struct { uint64_t start; uint64_t end; } e;
+        if (parse_one_maps_line(line_buf, &e) == 1) {
+            s_exec_ranges[s_exec_count].start = e.start;
+            s_exec_ranges[s_exec_count].end = e.end;
             s_exec_count++;
         }
     }
-    LOGD("[ArtMethod] parsed %d exec ranges", s_exec_count);
+    my_close(fd);
+    LOGD("[ArtMethod] streamed %zu bytes from maps, parsed %d exec ranges",
+         total_bytes, s_exec_count);
     /* 调试：打印前 8 与后 4 个 exec 区间 */
     for (int i = 0; i < s_exec_count && i < 8; i++)
-        LOGD("[ArtMethod] range[%d] 0x%llx-0x%llx", i, (unsigned long long)s_exec_ranges[i].start, (unsigned long long)s_exec_ranges[i].end);
+        LOGD("[ArtMethod] range[%d] 0x%llx-0x%llx", i,
+             (unsigned long long)s_exec_ranges[i].start,
+             (unsigned long long)s_exec_ranges[i].end);
     if (s_exec_count > 12)
         for (int i = s_exec_count - 4; i < s_exec_count; i++)
-            LOGD("[ArtMethod] range[%d] 0x%llx-0x%llx", i, (unsigned long long)s_exec_ranges[i].start, (unsigned long long)s_exec_ranges[i].end);
+            LOGD("[ArtMethod] range[%d] 0x%llx-0x%llx", i,
+                 (unsigned long long)s_exec_ranges[i].start,
+                 (unsigned long long)s_exec_ranges[i].end);
 }
 
 static int in_exec_range(uint64_t addr) {

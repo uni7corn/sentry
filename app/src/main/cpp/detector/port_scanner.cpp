@@ -129,7 +129,13 @@ static int s_frida_process_count = 0;
 static char s_dbus_details[MAX_DBUS_DETAILS][256];
 static int s_dbus_detail_count = 0;
 
-/* 从 /proc/net/tcp 解析 127.0.0.1 上 LISTEN(0A) 的端口，写入 ports[]，返回数量，最多 max_ports */
+/* 从 /proc/net/tcp 解析本机可达 LISTEN(0A) 端口（127.0.0.1 或 INADDR_ANY），
+ * 写入 ports[]，返回数量，最多 max_ports。
+ *
+ * 历史问题：旧实现只看 0100007F（127.0.0.1）。Frida 16+ 常通过
+ *   frida-server -l 0.0.0.0:0
+ * 绑定全部接口，对应 /proc/net/tcp 中本地地址 00000000 → D-Bus 探测会全部漏过。
+ * 现增加 INADDR_ANY（00000000）的同等解析。 */
 static int parse_listen_ports_localhost(int *ports, int max_ports) {
     int fd = my_open("/proc/net/tcp", O_RDONLY, 0);
     if (fd < 0) return 0;
@@ -139,17 +145,27 @@ static int parse_listen_ports_localhost(int *ports, int max_ports) {
     if (n <= 0) return 0;
     buffer[n] = '\0';
 
-    const char *needle_listen = " 0A ";
-    const char *needle_local = "0100007F:";  /* 127.0.0.1 */
+    const char *needle_listen   = " 0A ";
+    const char *needle_loopback = "0100007F:";  /* 127.0.0.1 */
+    const char *needle_anyaddr  = "00000000:";  /* INADDR_ANY (0.0.0.0) */
     int count = 0;
     const char *line = buffer;
     while (*line && count < max_ports) {
         const char *eol = my_strstr(line, "\n");
         const char *end = eol ? eol : (line + my_strlen(line));
         if (end > line && my_strstr(line, needle_listen) != nullptr) {
-            const char *addr = my_strstr(line, needle_local);
+            const char *addr = my_strstr(line, needle_loopback);
+            int skip = 9;  /* len("0100007F:") == len("00000000:") == 9 */
+            if (addr == nullptr) {
+                addr = my_strstr(line, needle_anyaddr);
+                /* 0.0.0.0 也可能出现在 rem_address；需保证它在行首 local_address 字段。
+                 * /proc/net/tcp 格式: "  N: LOCAL REMOTE STATE..."，local 段在第 2 个 token。
+                 * 简化处理：只接受 00000000:XXXX 距离行首 < 30 的命中（local_address 区间），
+                 * 远端地址通常在更靠后位置，跨距过远直接丢弃以降低误报。 */
+                if (addr != nullptr && (size_t)(addr - line) > 30) addr = nullptr;
+            }
             if (addr != nullptr) {
-                addr += 9;  /* skip "0100007F:" */
+                addr += skip;
                 int port_hex = 0;
                 while (*addr && *addr != ' ' && *addr != '\n') {
                     int v = (*addr >= '0' && *addr <= '9') ? (*addr - '0') :
@@ -160,8 +176,12 @@ static int parse_listen_ports_localhost(int *ports, int max_ports) {
                     addr++;
                 }
                 if (port_hex > 0 && port_hex <= 65535) {
-                    /* /proc/net/tcp 端口为两字节十六进制，直接转十进制即端口号 */
-                    ports[count++] = port_hex;
+                    /* 去重：同一端口可能同时以 0.0.0.0/127.0.0.1 出现 */
+                    int dup = 0;
+                    for (int i = 0; i < count; i++) {
+                        if (ports[i] == port_hex) { dup = 1; break; }
+                    }
+                    if (!dup) ports[count++] = port_hex;
                 }
             }
         }

@@ -13,7 +13,6 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     detector/art_method_detector.cpp
     detector/trap_detector.cpp
     detector/xposed_detector.cpp
-    detector/anti_debug.cpp
     utils/syscall_utils.cpp
 )
 

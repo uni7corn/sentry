@@ -5,7 +5,6 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
 import android.view.View;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -24,33 +23,12 @@ import anti.rusda.detector.EnvDetectionManager;
 import anti.rusda.ui.MainPagerAdapter;
 
 
-import java.security.MessageDigest;
-
-
-
-
-
 
 public class MainActivity extends BaseActivity {
     /** 反调试分数权重：1.5x（分子/分母避免浮点误差） */
     private static final int DEBUG_SCORE_WEIGHT_NUMERATOR = 3;
     private static final int DEBUG_SCORE_WEIGHT_DENOMINATOR = 2;
 
-    public static String md5(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] bytes = md.digest(input.getBytes("UTF-8"));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : bytes) {
-                int v = b & 0xFF;
-                if (v < 16) sb.append('0');
-                sb.append(Integer.toHexString(v));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return null;
-        }
-    }
     static {
         System.loadLibrary("antidebug");
         try {
@@ -150,8 +128,6 @@ public class MainActivity extends BaseActivity {
         }
 
         scheduleGitHubVersionCheckIfDue(prefs);
-
-        Log.d("SentryTag", "MainActivity    md5: " + md5("1234567890"));
     }
 
     /** 为底部 Tab 预留系统导航条（Home 条/手势条）区域，避免被遮挡 */

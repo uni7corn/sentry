@@ -101,12 +101,25 @@ static const char *ZYGISK_SIGNATURES[] = {
 
 static const char *EMULATOR_FILES[] = {
     "/dev/socket/qemud", "/dev/qemu_pipe", "/system/lib/libc_malloc_debug_qemu.so",
-    "/sys/qemu_trace", "/system/bin/qemu-props", nullptr
+    "/sys/qemu_trace", "/system/bin/qemu-props",
+    /* Cuttlefish (AOSP 当前主推的 emulator，替代 goldfish/ranchu) */
+    "/dev/socket/cuttlefish",
+    nullptr
 };
 
+/* Build.* 字段中的模拟器特征。新增：
+ *   cuttlefish / cf_x86_64 / vsoc — Cuttlefish（AOSP 14+ 主流模拟器）
+ *   redroid                       — Linux 上的 Android 容器（云手机/批量自动化常用）
+ *   nox / mumu / ldplayer        — 国内 PC 模拟器常见 brand/product
+ * 旧的 "generic"/"unknown" 在部分 OEM dev fingerprint 中也会出现，故仅作为弱信号
+ * （只产生 WARNING，不上 DANGER —— 维持现状由 detector 层处理）。 */
 static const char *EMULATOR_INDICATORS[] = {
     "generic", "unknown", "google_sdk", "sdk", "sdk_x86", "vbox86p",
-    "emulator", "simulator", "ranchu", "goldfish", nullptr
+    "emulator", "simulator", "ranchu", "goldfish",
+    "cuttlefish", "cf_x86_64", "cf_arm64", "vsoc",
+    "redroid",
+    "nox", "mumu", "ldplayer", "memu",
+    nullptr
 };
 
 /* Scan directory for filenames containing needle */
@@ -728,9 +741,18 @@ static void pid_to_str(int pid, char *buf, size_t buf_len) {
     buf[j] = '\0';
 }
 
-/* ADB ports: 5555(0x15B3), 5556(0x15B4), 5557(0x15B5), 5558(0x15B6) */
+/* ADB ports: 5555(0x15B3), 5556(0x15B4), 5557(0x15B5), 5558(0x15B6)
+ *
+ * /proc/net/tcp 行格式：
+ *   sl  local_address rem_address  st ...
+ *   0:  0100007F:15B3 00000000:0000 0A ...
+ *
+ * 历史问题：旧实现用 my_strstr(buf, "15B3") 在全文中裸搜，可能命中远端地址、inode、
+ * timer 字段等无关位置。改为同时要求：(1) 以 ":XXXX " 形式作为本地端口出现；
+ * (2) 同一行带 LISTEN 状态 " 0A "。两条都满足才算 ADB 在监听。 */
 static const int ADB_PORTS[] = { 5555, 5556, 5557, 5558, 0 };
-static const char *ADB_PORT_HEX[] = { "15B3", "15B4", "15B5", "15B6", nullptr };
+static const char *ADB_PORT_BOUNDARY[] = { ":15B3 ", ":15B4 ", ":15B5 ", ":15B6 ", nullptr };
+static const int ADB_PORT_DEC[]       = {  5555,    5556,    5557,    5558,    0      };
 
 /* Scan /proc/[pid]/comm for adbd process (syscall) */
 static bool adbd_process_running(void) {
@@ -795,7 +817,8 @@ int env_detect_adb(char (*details)[256], int max_details) {
         }
     }
 
-    /* 2. /proc/net/tcp - ADB ports in LISTEN (0A) - system-wide, bypass ContentResolver */
+    /* 2. /proc/net/tcp - ADB ports in LISTEN (0A) - system-wide, bypass ContentResolver
+     * 逐行解析：local_address 匹配 ":XXXX " 边界，并要求同一行包含 LISTEN 状态 " 0A "。 */
     int fd = my_open("/proc/net/tcp", 0, 0);
     if (fd >= 0) {
         char buf[8192];
@@ -803,12 +826,29 @@ int env_detect_adb(char (*details)[256], int max_details) {
         my_close(fd);
         if (rd > 0) {
             buf[rd] = '\0';
-            for (int i = 0; ADB_PORT_HEX[i] != nullptr && n < max_details; i++) {
-                if (my_strstr(buf, ADB_PORT_HEX[i]) != nullptr) {
-                    snprintf(details[n], 256, "ADB port in /proc/net/tcp (hex %s)", ADB_PORT_HEX[i]);
-                    n++;
-                    break;  /* one detail for net/tcp finding */
+            const char *line = buf;
+            int reported = 0;
+            while (*line && n < max_details && !reported) {
+                const char *eol = my_strstr(line, "\n");
+                size_t line_len = eol ? (size_t)(eol - line) : my_strlen(line);
+                /* 只检查行内（避免 my_strstr 跨行命中） */
+                char tmp[256];
+                size_t copy_len = line_len < sizeof(tmp) - 1 ? line_len : sizeof(tmp) - 1;
+                my_memcpy(tmp, line, copy_len);
+                tmp[copy_len] = '\0';
+                if (my_strstr(tmp, " 0A ") != nullptr) {
+                    for (int i = 0; ADB_PORT_BOUNDARY[i] != nullptr && n < max_details; i++) {
+                        if (my_strstr(tmp, ADB_PORT_BOUNDARY[i]) != nullptr) {
+                            snprintf(details[n], 256,
+                                     "ADB port %d in LISTEN (/proc/net/tcp)", ADB_PORT_DEC[i]);
+                            n++;
+                            reported = 1;  /* 一处即可，避免多端口同时报满 details */
+                            break;
+                        }
+                    }
                 }
+                if (!eol) break;
+                line = eol + 1;
             }
         }
     }

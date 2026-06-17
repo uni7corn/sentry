@@ -19,9 +19,9 @@
 
 ## Detection surface · 检测覆盖面
 
-**中文**：共 **21** 项：调试域 **11**（Frida / 端口与进程 / 内存与 maps / ptrace与调试器 / Xposed·Hook 框架 / SO 代码段完整性 / ArtMethod / Hook 陷阱 / 脏页与内存注入等），环境域 **10**（签名校验、Bootloader·Key Attestation、Magisk/Root、危险应用、可疑路径、模拟器、内核补丁陈旧度、ADB、多开、容器与 cgroup 等）。状态 `NORMAL` / `WARNING` / `DANGER`，核心项加权、辅助项降权，`warnOnly` 仅提示不扣分。  
+**中文**：共 **21** 项：调试域 **11**（Frida / 端口与进程 / 内存与 maps / ptrace 与调试器 / Xposed·Hook 框架 / SO 代码段完整性 / ArtMethod / Hook 陷阱 / 脏页与内存注入等），环境域 **10**（签名校验、Bootloader·Key Attestation、Magisk/Root、危险应用、可疑路径、模拟器、内核补丁陈旧度、ADB、多开、容器与 cgroup 等）。状态 `NORMAL` / `WARNING` / `DANGER`，**调试域统一施加 1.5× 权重**、辅助项降权，`warnOnly` 仅提示不扣分。详细每项原理与已知限制见 [`doc/DETECTION_SPEC.md`](doc/DETECTION_SPEC.md)。
 
-**English**: **21** checks in two domains—**11** anti-debug / instrumentation (Frida thread & port signals, memory/maps, ptrace & debugger attachment, Xposed/hook framework, in-memory SO integrity, ArtMethod entry, SIGTRAP hook trap, dirty-page / injection heuristics, etc.) and **10** environment & integrity (APK signature gating, Bootloader + Key Attestation RootOfTrust, Magisk/root, “dangerous apps”, suspicious paths, emulator heuristics, patch staleness, multi-channel ADB, multi-instance, container/cgroup). Tri-state outcomes with **weighted scoring** and **`warnOnly`** items that alert without tanking the score.
+**English**: **21** checks in two domains—**11** anti-debug / instrumentation (Frida thread & port signals, memory/maps, ptrace & debugger attachment, Xposed/hook framework, in-memory SO integrity, ArtMethod entry, SIGTRAP hook trap, dirty-page / injection heuristics, etc.) and **10** environment & integrity (APK signature gating, Bootloader + Key Attestation RootOfTrust, Magisk/root, "dangerous apps", suspicious paths, emulator heuristics, patch staleness, multi-channel ADB, multi-instance, container/cgroup). Tri-state outcomes with **weighted scoring (debug items ×1.5)** and **`warnOnly`** items that alert without tanking the score. Per-item details, code locations, and known platform limits live in [`doc/DETECTION_SPEC.md`](doc/DETECTION_SPEC.md).
 
 ---
 
@@ -63,7 +63,7 @@
    Root/Magisk 路径与包名、**APK ZIP** 内 **`assets/xposed_init`**、**modules.list** 等与 Java **`GET_META_DATA`** 列表形成**危险应用**多通道；**容器**侧结合包名/`cmdline` 不一致与 **`/proc/1/cgroup`** 等信号。
 
 11. **评分语义**  
-   总分由加权求和构成（满分 **205** 按当前项权重）；**`warnOnly`** 在 **WARNING** 时仍计满分，仅 UI 警示——把“开发机常开 ADB、补丁偏旧、装有 Xposed 模块但不等于正在 hook 本进程”等场景从分数里解耦，减少运营误伤。
+   总分 = Σ(调试项 earned × 1.5) + Σ(环境项 earned)，按当前权重满分 **260**（调试域 165 + 环境域 95）；首页"100"等价 score/260 == 100%。**`warnOnly`** 在 **WARNING** 时仍计满分，仅 UI 警示——把"开发机常开 ADB、补丁偏旧、装有 Xposed 模块但不等于正在 hook 本进程"等场景从分数里解耦，减少运营误伤。权重源在 [`MainActivity.applyDebugScoreWeight`](app/src/main/java/anti/rusda/MainActivity.java)，调整时务必同步 [`doc/DETECTION_SPEC.md`](doc/DETECTION_SPEC.md) 的合计。
 
 ### English
 
@@ -98,10 +98,20 @@
    Magisk/root paths and packages; **Xposed module** discovery merges Java **`GET_META_DATA`/launcher queries** with native **ZIP/`assets/xposed_init`** probes and **`modules.list`** reads where accessible; **virtualization** blends package/`cmdline` mismatches and **`/proc/1/cgroup`** hints (`lxc`, `docker`, `kubepods`, …).
 
 11. **Scoring semantics**  
-   The dashboard aggregates **weighted** item scores (current design totals **205** points at full credit). **`warnOnly`** flips **WARNING** into a **no-penalty** alert—keeping developer realities (ADB enabled, stale patch level, modules installed but not attacking this app) from dominating the headline percentage.
+   `score = Σ(debug.earned × 1.5) + Σ(env.earned)`. Current totals: **260** points at full credit (165 debug + 95 environment). The headline number is `score / 260 × 100`. **`warnOnly`** flips **WARNING** into a **no-penalty** alert—keeping developer realities (ADB enabled, stale patch level, modules installed but not attacking this app) from dominating the headline percentage. Weight source lives in [`MainActivity.applyDebugScoreWeight`](app/src/main/java/anti/rusda/MainActivity.java); keep [`doc/DETECTION_SPEC.md`](doc/DETECTION_SPEC.md) totals in sync when changing it.
+
+---
+
+## Platform support · 平台覆盖
+
+- ABI: **arm64-v8a only**（见 [`app/build.gradle`](app/build.gradle) `abiFilters`）。32 位机型会 `UnsatisfiedLinkError` 后 Java 兜底，多数检测显示 Check skipped。
+- minSdk **24** (Android 7)、targetSdk **36**；构建启用 `-Wl,-z,max-page-size=16384` 适配 Android 15+ 16 KB page。
+- 部分检测在现代 Android 上存在受限场景（如 untrusted_app 不可读 `/proc/self/pagemap`、SELinux 拒绝 `/data/adb/*` 访问）。各项的失效条件、回退策略与误报陷阱见 [`doc/DETECTION_SPEC.md` § 平台覆盖与已知限制](doc/DETECTION_SPEC.md#平台覆盖与已知限制)。
 
 ---
 
 ## Further reading · 延伸阅读
 
-技术原理、关键代码摘录与 21 项速查见 **`doc/DETECTION_SPEC.md`**。
+- [`doc/DETECTION_SPEC.md`](doc/DETECTION_SPEC.md)：21 项检测的完整规格——原理、命中条件、代码位置、权重、warnOnly、已知限制、误报场景。
+- [`SentryApp.java`](app/src/main/java/anti/rusda/SentryApp.java)：启动期签名 fail-fast 入口。
+- [`MainActivity.java`](app/src/main/java/anti/rusda/MainActivity.java)：调度与评分权重源头。

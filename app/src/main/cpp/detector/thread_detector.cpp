@@ -10,18 +10,21 @@
 #define LOG_TAG "SentryTag"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
+/* Frida/Gum 注入栈专属线程名（comm 在 Linux 上截短至 15 字节）。
+ *
+ * 历史问题：旧列表含 gmain/gdbus/gthread/gpool/gjs-context —— 这些是 GLib 的标准
+ * 线程名，任何合法使用 GLib 的库（如部分 GStreamer/3D 引擎/cairo 等）都会触发
+ * 误报。Frida 在被注入进程里确实会启动 GLib 线程，但这类信号必须配合 maps 上
+ * 的 Frida ELF 才有判断力，单独看 comm 不可靠。这里只保留几乎不可能在普通
+ * App 中出现的关键词，宁可漏报也不要让"开始检测 → 立即标红"成为常态。
+ */
 static const char *FRIDA_THREAD_KEYWORDS[] = {
-    "gmain",
-    "gdbus",
-    "pool-spawner",
+    "gum-js-loop",   /* GumJS 主循环 */
     "frida-agent",
     "frida-gadget",
-    "frida",
-    "gum-js-loop",
-    "gthread",
-    "gpool",
-    "gjs-context",
+    "frida-server",
     "frida-helper",
+    "linjector",     /* Frida linjector 注入器 */
     nullptr
 };
 

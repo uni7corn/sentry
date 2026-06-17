@@ -219,17 +219,49 @@ bool check_plt_hooks(void) {
     return check_got_points_to_anon_trampoline();
 }
 
-/* 使用 syscall 打开/读取 libc，避免 libc 的 open/close 被 hook 后误判 */
+/* libc 路径可达性自检（仅用于侦测异常环境，不作为 hook 判据）。
+ *
+ * 历史问题：旧实现写死 /system/lib64/libc.so，但自 Android 10 起 libc 已迁至
+ * /apex/com.android.runtime/lib64/bionic/libc.so，且 SELinux 通常禁止 untrusted_app
+ * 直接读取 /system/lib64/*。打不开就判 hooked 会让"几乎所有现代设备"都误报。
+ *
+ * 修复思路：通过 dl_iterate_phdr 取当前进程实际加载的 libc 路径再 syscall open；
+ * 仍打不开才是真异常。注意：在很多设备上 /apex 路径对 untrusted_app 也是不可读的，
+ * 因此本函数只能"否证"打开失败本身不能可靠判定为 hook —— 现把它降级为辅助信号，
+ * 由上层 detect_hooks() 不再据此返回 DANGER。inline + PLT/GOT 检查才是主信号。
+ */
+typedef struct {
+    char path[256];
+    int found;
+} libc_path_t;
+
+static int collect_libc_path_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    if (!info->dlpi_name) return 0;
+    if (!my_strstr(info->dlpi_name, "/libc.so")) return 0;
+    libc_path_t *out = (libc_path_t *)data;
+    my_strncpy(out->path, info->dlpi_name, sizeof(out->path) - 1);
+    out->path[sizeof(out->path) - 1] = '\0';
+    out->found = 1;
+    return 1;
+}
+
 bool check_library_integrity(void) {
-    int fd = my_open("/system/lib64/libc.so", O_RDONLY, 0);
-    if (fd < 0) {
-        fd = my_open("/system/lib/libc.so", O_RDONLY, 0);
-    }
-    if (fd < 0) {
-        LOGD("Cannot open libc (syscall) - possible tampering or path");
+    libc_path_t info = {0};
+    dl_iterate_phdr(collect_libc_path_cb, &info);
+    if (!info.found) {
+        /* 进程内拿不到 libc 路径才算异常 */
+        LOGD("[HOOK] libc not visible via dl_iterate_phdr (suspicious)");
         return true;
     }
-    my_close(fd);
+    int fd = my_open(info.path, O_RDONLY, 0);
+    if (fd >= 0) {
+        my_close(fd);
+        return false;
+    }
+    /* 打不开很可能只是 SELinux/apex 权限问题 → 不作 DANGER 判据，仅记录 */
+    LOGD("[HOOK] libc path %s not openable (likely SELinux, not necessarily a hook)",
+         info.path);
     return false;
 }
 
