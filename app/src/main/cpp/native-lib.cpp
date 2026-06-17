@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <cstdio>
 #include <android/log.h>
 
 #include "detector/thread_detector.h"

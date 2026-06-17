@@ -223,7 +223,7 @@ bool check_plt_hooks(void) {
  *
  * 历史问题：旧实现写死 /system/lib64/libc.so，但自 Android 10 起 libc 已迁至
  * /apex/com.android.runtime/lib64/bionic/libc.so，且 SELinux 通常禁止 untrusted_app
- * 直接读取 /system/lib64/*。打不开就判 hooked 会让"几乎所有现代设备"都误报。
+ * 直接读取 /system/lib64 下的任意文件。打不开就判 hooked 会让"几乎所有现代设备"都误报。
  *
  * 修复思路：通过 dl_iterate_phdr 取当前进程实际加载的 libc 路径再 syscall open；
  * 仍打不开才是真异常。注意：在很多设备上 /apex 路径对 untrusted_app 也是不可读的，

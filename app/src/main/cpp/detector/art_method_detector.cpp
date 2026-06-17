@@ -13,7 +13,11 @@
 #define ART_METHOD_ENTRY_OFFSET_3  64
 
 #define MAX_MAPS_RANGES 256
-static struct { uint64_t start; uint64_t end; } s_exec_ranges[MAX_MAPS_RANGES];
+typedef struct {
+    uint64_t start;
+    uint64_t end;
+} exec_range_t;
+static exec_range_t s_exec_ranges[MAX_MAPS_RANGES];
 static int s_exec_count;
 
 static int hex_val(char c) {
@@ -24,7 +28,7 @@ static int hex_val(char c) {
 }
 
 /* 解析单行 maps 文本（不含换行），写入 entry。返回 1=可执行段、0=非可执行、-1=parse 失败 */
-static int parse_one_maps_line(const char *line, struct { uint64_t start; uint64_t end; } *entry) {
+static int parse_one_maps_line(const char *line, exec_range_t *entry) {
     uint64_t start = 0, end = 0;
     char perms[8] = {0};
     const char *p = line;
@@ -80,7 +84,7 @@ static void parse_maps_exec_ranges(void) {
             if (c == '\n' || line_pos >= sizeof(line_buf) - 1) {
                 line_buf[line_pos] = '\0';
                 if (line_pos > 0) {
-                    struct { uint64_t start; uint64_t end; } e;
+                    exec_range_t e;
                     if (parse_one_maps_line(line_buf, &e) == 1) {
                         s_exec_ranges[s_exec_count].start = e.start;
                         s_exec_ranges[s_exec_count].end = e.end;
@@ -100,7 +104,7 @@ static void parse_maps_exec_ranges(void) {
     /* 文件末尾无换行的最后一行 */
     if (line_pos > 0 && s_exec_count < MAX_MAPS_RANGES) {
         line_buf[line_pos] = '\0';
-        struct { uint64_t start; uint64_t end; } e;
+        exec_range_t e;
         if (parse_one_maps_line(line_buf, &e) == 1) {
             s_exec_ranges[s_exec_count].start = e.start;
             s_exec_ranges[s_exec_count].end = e.end;
