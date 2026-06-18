@@ -301,7 +301,8 @@ bool detect_frida_ports(void) {
         }
     }
 
-    /* 系统 net/tcp 中 LISTEN(0A) 行：Frida 27042(0x699A)、IDA android_server 23946(0x5D8A)；边界匹配 ":699A "/":5D8A " 避免误报 */
+    /* 系统 net/tcp 中 LISTEN(0A) 行：Frida 27042(0x69A2)、IDA android_server 23946(0x5D8A)；边界匹配 ":69A2 "/":5D8A " 避免误报
+     * 注意：27042 的十六进制是 0x69A2（旧代码误写成 0x699A=27034，导致该分支从不命中真实 Frida 端口，全靠 connect 兜底） */
     const char *net_tcp_path = "/proc/net/tcp";
     int fd = my_open(net_tcp_path, O_RDONLY, 0);
     if (fd >= 0) {
@@ -315,7 +316,7 @@ bool detect_frida_ports(void) {
                 const char *eol = my_strstr(line, "\n");
                 if (eol && eol > line && my_strstr(line, " 0A ") != nullptr) {
                     int add_port = -1;
-                    if (my_strstr(line, ":699A ") != nullptr) add_port = 27042;
+                    if (my_strstr(line, ":69A2 ") != nullptr) add_port = 27042;
                     else if (my_strstr(line, ":5D8A ") != nullptr) add_port = 23946;
                     if (add_port > 0) {
                         int j;

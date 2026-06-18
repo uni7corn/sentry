@@ -56,3 +56,7 @@ Thumbs.db
 !build.gradle
 !settings.gradle
 !gradle.properties
+
+# Local build artifacts & helper (machine-specific, not for VCS)
+local-build/
+build_in_wsl.sh

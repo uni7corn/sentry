@@ -40,6 +40,8 @@ public class DebugDetectionManager {
     private static native String[] nativeGetArtMethodCheckResult(Class<?> targetClass);
     /** Hook 陷阱检测（SIGTRAP 是否被本进程 handler 捕获） */
     private static native String[] nativeGetTrapCheckResult();
+    /** ClassLinker class_loaders_ 链表节点计数（ART 内存扫）；返回 int[3]={count, clOff, listOff}，count<0 表示扫描失败 */
+    private static native int[] nativeDetectClassLoaderCount();
 
     public static void ensureNativeLoaded() {
         try {
@@ -389,6 +391,45 @@ public class DebugDetectionManager {
             } catch (NumberFormatException ignored) { }
         }
 
+        /* 7. Native: ClassLinker class_loaders_ 链表计数（ART 内存扫，GC 硬约束）。
+         *
+         * 原理：LSPosed 必须把模块 ClassLoader 挂在 ClassLinker::class_loaders_ 链上，
+         * 否则 GC 回收 → 模块失效。这是 GC 模型决定的硬约束，Shamiko 这类 Hook
+         * 系统查询接口的隐藏手段挡不住——我们直接读 C++ 堆内存里的链表。
+         *
+         * 误报控制（关键）：
+         *  - 计数本身只作辅助证据，绝不单独定 DANGER（微信/手淘/银行 App 等用
+         *    多层 ClassLoader 的合法应用计数本就偏高）。这里检测的是 Sentry 自身
+         *    进程，结构简单，baseline 实测见 doc/DETECTION_SPEC.md。
+         *  - 仅当计数显著超过校准阈值（CL_COUNT_DANGER）时，才作为独立强信号；
+         *    中间区间只记录详情，不扣分。
+         *  - 已被其他通道判 DANGER 时，高计数仅佐证。
+         *  - 扫描失败（ART 版本/布局漂移）返回 <0，fail-safe 跳过，不影响结论。 */
+        try {
+            int[] clRes = nativeDetectClassLoaderCount();
+            if (clRes != null && clRes.length >= 1) {
+                int clCount = clRes[0];
+                if (clCount < 0) {
+                    details.add("ClassLinker scan unavailable (ART layout/version)");
+                } else {
+                    details.add("ClassLinker class_loaders_ count: " + clCount
+                            + " (offsets cl=0x" + Integer.toHexString(clRes.length > 1 ? clRes[1] : 0)
+                            + " list=0x" + Integer.toHexString(clRes.length > 2 ? clRes[2] : 0) + ")");
+                    if (clCount >= CL_COUNT_DANGER) {
+                        details.add("Abnormally high ClassLoader count (>= " + CL_COUNT_DANGER
+                                + ") - strong LSPosed/injection indicator");
+                        status = DetectionResult.STATUS_DANGER;
+                    } else if (clCount >= CL_COUNT_NOTICE && status == DetectionResult.STATUS_DANGER) {
+                        details.add("Elevated ClassLoader count corroborates framework injection");
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            /* native 调用异常时不影响其它通道结论 */
+            details.add("ClassLinker scan error: "
+                    + (t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
+        }
+
         return new DetectionResult(
                 "Xposed / Hook Framework",
                 status == DetectionResult.STATUS_NORMAL ? "No Xposed detected" : "Framework modification detected",
@@ -396,6 +437,25 @@ public class DebugDetectionManager {
                 details
         );
     }
+
+    /* ClassLinker class_loaders_ 计数阈值（针对 Sentry 自身这种简单进程校准）。
+     * CL_COUNT_DANGER：超过此值视为强注入信号 → 独立判 DANGER。
+     * CL_COUNT_NOTICE：超过此值时若已 DANGER 则补一条佐证详情（永不独立扣分）。
+     *
+     * 校准依据（均 Pixel 6 Pro / Android 16 实测，fresh-process 各 3 次稳定取值，
+     * 详见 doc/DETECTION_SPEC.md D7）：
+     *   - 干净环境 baseline                 = 3
+     *   - 活跃注入环境（frida + libart 被改）= 12
+     *   - 原文另测 LSPosed 注入             = 13-15
+     *   综合：干净 ≤5、注入 ≥12，安全间隔约 [6,11]。
+     *   DANGER=9 取间隔中部（高出干净上限 4、低于注入下限 3，双侧留余量）：既不
+     *   误伤干净设备（本工具第一优先级），又能稳抓注入（注入值降到 9-11 仍命中）。
+     * 兜底：D7 还有 inline/PLT/GOT/ClassLoader 实例等多条通道，注入即使绕过本计数
+     *   也会被其它通道抓住，故此处取偏保守阈值优先压低误报。
+     * 注意：常量基于"被检测进程是 Sentry 自身（结构简单）"校准；注入值受加载模块
+     *   数影响，移植到多 ClassLoader 宿主 App 必须重新测定 baseline 与阈值。 */
+    private static final int CL_COUNT_DANGER = 9;
+    private static final int CL_COUNT_NOTICE = 7;
 
     /** 通过自造异常检查堆栈中是否包含 Xposed 特征类名 */
     private static boolean detectXposedInStack() {

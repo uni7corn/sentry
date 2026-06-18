@@ -152,7 +152,7 @@ percent = round(100 × score / max)
 
 | 字段 | 值 |
 |---|---|
-| 实现 | [`DebugDetectionManager.checkLibraryIntegrity()`](../app/src/main/java/anti/rusda/detector/DebugDetectionManager.java) + [`hook_detector.cpp`](../app/src/main/cpp/detector/hook_detector.cpp) + [`xposed_detector.cpp`](../app/src/main/cpp/detector/xposed_detector.cpp) |
+| 实现 | [`DebugDetectionManager.checkLibraryIntegrity()`](../app/src/main/java/anti/rusda/detector/DebugDetectionManager.java) + [`hook_detector.cpp`](../app/src/main/cpp/detector/hook_detector.cpp) + [`xposed_detector.cpp`](../app/src/main/cpp/detector/xposed_detector.cpp) + [`class_linker_scan.cpp`](../app/src/main/cpp/detector/class_linker_scan.cpp) |
 | 权重 | maxScore = 10（× 1.5 = 15） |
 | 状态 | 任一证据成立 → DANGER |
 
@@ -167,9 +167,42 @@ percent = round(100 × score / max)
 2. `hook_detector.check_inline_hooks` 读取 `dlsym(malloc/free/open/...)` 的前 8 字节，匹配 ARM64 `LDR+BR` 或长跳转模式。
 3. `hook_detector.check_plt_hooks` —— GOT 指针逃逸：若 dlsym 结果落入"可疑匿名 RX"段，疑为 trampoline。
 4. ARM64 LR 检测：从汇编取 `x30`，若返回地址不在自身模块范围内，疑为内联 hook trampoline。
+5. **ClassLinker class_loaders_ 计数**（见下）。
 
 **修复（本版本）**：
 旧 `check_library_integrity` 硬编码 `/system/lib64/libc.so` / `/system/lib/libc.so`，但 Android 10+ libc 在 `/apex/com.android.runtime/lib64/bionic/libc.so`，且 SELinux 禁止 untrusted_app 读 `/system/lib64`。打不开就判 hooked → **几乎所有现代设备误报**。已改为通过 `dl_iterate_phdr` 取本进程实际加载的 libc 路径并降级该信号（不能仅凭 open 失败判 DANGER）。
+
+#### ClassLinker class_loaders_ 计数（ART 内存盲扫）
+
+**原理**：ART 的 `ClassLinker::class_loaders_` 是一条 `std::list`，登记进程内所有**存活**的 ClassLoader。LSPosed 要注入就必须把模块 ClassLoader 挂上这条链——否则 GC 判其不可达直接回收，模块代码被卸载、Hook 失效。这是 GC 模型决定的硬约束：**Shamiko 这类 Hook 系统查询接口的隐藏手段挡不住直接读 C++ 堆内存里的链表**。
+
+**实现**（[`class_linker_scan.cpp`](../app/src/main/cpp/detector/class_linker_scan.cpp)，不依赖任何符号/私有 API）：
+1. `JNIEnv->GetJavaVM()` 拿 `JavaVMExt*`，在 `vm + [0, 0x40]` 范围逐字探测候选 `Runtime*`。
+2. 对每个候选 Runtime，在 `[0, 0xE00]` 扫成员指针；候选对象首 8 字节（vtable）须落在 `/proc/self/maps` 的 libart.so 段内（特征 A）。
+3. 在该对象 `[0, 0x800]` 找满足双向闭环（`next->prev==head && prev->next==head`，特征 B）且节点数 ≥2（特征 C）的 `std::list` 头——即 `class_loaders_`。三特征同时命中才锁定，误命中概率极低。
+4. 锁定后缓存 `(vm_runtime_off, cl_off, list_off)` 三偏移，后续走快速路径直接计数。
+
+**误报控制（关键，与本工具"宁缺毋滥"原则一致）**：
+- 计数只作**辅助证据**，绝不单独凭计数定 DANGER —— 复杂宿主 App（微信/手淘/银行）本就用多层 ClassLoader，计数天然偏高。
+- 本检测扫的是 **Sentry 自身进程**（结构简单），故阈值是针对它校准的。均为 Pixel 6 Pro /
+  Android 16 实测，fresh-process 各 3 次稳定取值：
+  - 干净环境 **baseline = 3**
+  - 活跃注入环境（手动起 frida + smaps 显示 libart 被打 Private_Dirty）**= 12**（且 Sentry
+    自身 maps 内 **0 个匿名 r-x、无 frida 字符串** —— 注入特征被隐藏，唯独 ClassLoader
+    计数瞒不住，正是本技术的价值所在）
+  - 原文另测 LSPosed 注入 = **13-15**
+  - 综合：干净 ≤5、注入 ≥12，安全间隔约 [6,11]。**`CL_COUNT_DANGER = 9`** 取间隔中部
+    （高出干净上限 4、低于注入下限 3，双侧留余量）：既不误伤干净设备，又能稳抓注入。
+  - **`CL_COUNT_NOTICE = 7`**：仅当其它通道已 DANGER 时补一条佐证详情，**永不独立扣分**。
+- 兜底：D7 还有 inline / PLT·GOT / ClassLoader 实例等多条通道，注入即使绕过本计数也会被
+  其它通道抓住，故计数阈值取偏保守值优先压低误报。
+- 阈值常量在 [`DebugDetectionManager`](../app/src/main/java/anti/rusda/detector/DebugDetectionManager.java)。
+  注入值受加载模块数影响；移植到多 ClassLoader 宿主 App 时必须重新测定 baseline 与阈值。
+
+**实测踩坑（Android 16，原文方案在新系统失效的根因）**：
+- **指针标签 / TBI**：arm64 上 app 堆指针顶字节带 tag（实测 `vm = 0xb400_007d_...`，tag `0xb4`）。硬件解引用按 Top-Byte-Ignore 忽略顶字节，但裸算术比较（`< 0x8000_0000_0000`、与链表节点互比）会被高位污染。**所有指针在比较/查表前先 `& 0x00FF_FFFF_FFFF_FFFF` 去标签**，否则全盘失败。原文作者只在 Android 13/14 测过，未触发标签。
+- **mincore 不可用**：原文用 `mincore` 判页可读，实测 Android 16 上对 app 进程失败 → 所有可读性判否、扫描提前夭折。改为**解析 `/proc/self/maps` 建可读区间表**（syscall 直读、抗 hook、一次解析）判定地址有效性，上限 8192 段（现代 App maps 段数可达数千）。
+- 失败 fail-safe：定位不到（OEM 魔改布局 / ART 版本漂移）返回 `-1`，上层跳过该信号、**不产生误报**。
 
 ### D8. SO Code Integrity
 

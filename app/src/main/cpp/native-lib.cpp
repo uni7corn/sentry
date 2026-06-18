@@ -10,6 +10,7 @@
 #include "detector/art_method_detector.h"
 #include "detector/trap_detector.h"
 #include "detector/xposed_detector.h"
+#include "detector/class_linker_scan.h"
 
 #define MAX_MEMORY_DETAILS 16
 
@@ -226,6 +227,19 @@ Java_anti_rusda_detector_DebugDetectionManager_nativeGetFridaPortScanResult(JNIE
             if (detail) env->SetObjectArrayElement(arr, 2 + idx++, env->NewStringUTF(detail));
         }
     }
+    return arr;
+}
+
+// ClassLinker class_loaders_ list node count (ART memory scan)
+// Returns int[3] = { count, cl_offset, list_offset }; count < 0 means scan failed.
+JNIEXPORT jintArray JNICALL
+Java_anti_rusda_detector_DebugDetectionManager_nativeDetectClassLoaderCount(JNIEnv *env, jclass clazz) {
+    int cl_off = -1, list_off = -1;
+    int count = detect_classloader_count(env, &cl_off, &list_off);
+    jintArray arr = env->NewIntArray(3);
+    if (!arr) return nullptr;
+    jint vals[3] = { (jint)count, (jint)cl_off, (jint)list_off };
+    env->SetIntArrayRegion(arr, 0, 3, vals);
     return arr;
 }
 
