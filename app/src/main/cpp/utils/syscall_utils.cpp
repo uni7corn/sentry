@@ -186,6 +186,38 @@ ssize_t my_lseek(int fd, off_t offset, int whence) {
 }
 #endif
 
+/* XOM 安全的可读性探针：把 addr 处的字节 write() 进管道；内核拷贝时若源不可读
+ * 会返回 EFAULT/短写，而不会让本进程崩溃。pipe2 优先（arm64 无 __NR_pipe）。 */
+#if defined(__arm__) && !defined(__NR_pipe)
+#define __NR_pipe 42
+#endif
+#ifndef __NR_pipe2
+#if defined(__aarch64__)
+#define __NR_pipe2 59
+#endif
+#endif
+int mem_readable(const void *addr, size_t len) {
+    if (!addr || len == 0) return 0;
+    int pfd[2] = {-1, -1};
+    long r = -1;
+#if defined(__NR_pipe2)
+    r = do_syscall(__NR_pipe2, (long)pfd, 0, 0, 0, 0, 0);
+#elif defined(__NR_pipe)
+    r = do_syscall(__NR_pipe, (long)pfd, 0, 0, 0, 0, 0);
+#endif
+    if (r != 0 || pfd[0] < 0 || pfd[1] < 0) {
+        /* 无法探测：保守地视为不可读，调用方跳过该读取以避免潜在崩溃 */
+        if (pfd[0] >= 0) my_close(pfd[0]);
+        if (pfd[1] >= 0) my_close(pfd[1]);
+        return 0;
+    }
+    /* len 很小（通常 <= 8），管道缓冲足够，不会阻塞 */
+    ssize_t n = my_write(pfd[1], addr, len);
+    my_close(pfd[0]);
+    my_close(pfd[1]);
+    return (n == (ssize_t)len) ? 1 : 0;
+}
+
 #if defined(__NR_socket) && defined(__NR_connect) && defined(__NR_setsockopt)
 int my_socket(int domain, int type, int protocol) {
     return (int) do_syscall(__NR_socket, domain, type, protocol, 0, 0, 0);

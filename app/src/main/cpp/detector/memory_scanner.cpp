@@ -83,6 +83,8 @@ static int scan_region_for_trampoline(unsigned long start, unsigned long end) {
     if (to_read < 16) return 0;
 
     unsigned char *ptr = (unsigned char *)(uintptr_t)start;
+    /* XOM 守卫：匿名可执行段可能只执行不可读，读其字节会 SEGV_ACCERR（issue #2）。 */
+    if (!mem_readable(ptr, 16)) return 0;
     return count_trampoline_patterns(ptr, to_read);
 }
 

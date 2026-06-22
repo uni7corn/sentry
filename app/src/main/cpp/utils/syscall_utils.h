@@ -26,6 +26,18 @@ int my_gettid(void);
 int my_tgkill(pid_t pid, int tid, int sig);
 ssize_t my_lseek(int fd, off_t offset, int whence);
 
+/**
+ * 探测 [addr, addr+len) 是否可读，且不会因不可读而崩溃。
+ *
+ * 部分机型（实测 HONOR KOZ-AL00 / Android 10 等）把 .text 映射为 Execute-Only
+ * Memory（XOM，--x 无 r）。直接读代码段字节会触发 SIGSEGV(SEGV_ACCERR)。本函数
+ * 用 write() 到管道做内核态拷贝探测：源缓冲不可读时 write 返回 EFAULT/短写而非
+ * 崩溃。读任何代码段 / 匿名可执行段字节前都应先用它守卫。
+ *
+ * @return 1 可读；0 不可读或无法探测（调用方应跳过该次读取，视为"无法检查"）
+ */
+int mem_readable(const void *addr, size_t len);
+
 // Socket syscalls (bypass libc hooks for connect/socket/close/send/recv)
 int my_socket(int domain, int type, int protocol);
 int my_connect(int sockfd, const void *addr, unsigned int addrlen);

@@ -464,6 +464,7 @@ E1「App Signature」走 `PackageManager.getPackageInfo(GET_SIGNING_CERTIFICATES
 | D8 libc CRC | `/apex/.../libc.so` SELinux EACCES | 已用 dl_iterate_phdr 拿运行时路径；失败回退 -1（Check skipped）并由 GOT/匿名 RX 补充 |
 | E5 `/data/adb/*` 路径 | untrusted_app 无读权限 | 不影响 root 设备；非 root 设备本就不应有这些路径 |
 | D7 旧 `/system/lib*/libxposed*.so` 路径 | LSPosed 时代 Xposed 框架已不走该路径 | 已并联 LSPosed 路径 (`/data/adb/lspd`、`zygisk_lsposed`) |
+| D7/D8 读函数序言/代码段字节 | 部分机型（实测 HONOR KOZ-AL00 / Android 10）`.text` 为 Execute-Only Memory（XOM，--x 无 r），直接读会 `SEGV_ACCERR` 崩溃（issue #2） | 读代码前用 `mem_readable()`（write 到管道探 EFAULT）守卫；XOM 段跳过该检查而非崩溃，交由 GOT 指针逃逸/ClassLinker 等通道判定 |
 
 ### 设计上不做的事
 

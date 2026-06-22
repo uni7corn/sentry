@@ -65,6 +65,8 @@ static uint32_t calc_crc32(uint32_t crc, const unsigned char *data, size_t lengt
  */
 static int scan_for_hook_patterns(const void *addr, size_t size) {
     if (size < 8) return 0;
+    /* XOM 守卫：匿名可执行段可能只执行不可读，读其字节会 SEGV_ACCERR（issue #2）。 */
+    if (!mem_readable(addr, 8)) return 0;
     const uint64_t *code = (const uint64_t *)addr;
     size_t num_qwords = size / 8;
 
@@ -106,6 +108,7 @@ int check_critical_functions(void) {
     for (int i = 0; names[i]; i++) {
         void *sym = dlsym(RTLD_DEFAULT, names[i]);
         if (!sym) continue;
+        if (!mem_readable(sym, 8)) continue;  /* XOM(.text 只执行不可读)：跳过，防 SEGV */
         uint64_t first8 = *(const uint64_t *)sym;
         if (first8 == p1 || first8 == p2) {
             LOGD("[SO] Critical function %s at %p: Frida hook confirmed", names[i], sym);
@@ -158,6 +161,14 @@ int check_libc_text_integrity(void) {
     dl_iterate_phdr(get_libc_text_info_callback, &mem_info);
     if (!mem_info.found) {
         LOGD("[CRC] libc not found in memory");
+        return -1;
+    }
+
+    /* XOM 守卫：若 libc .text 只执行不可读（部分机型，issue #2），整段 CRC 内存读
+     * 会 SEGV_ACCERR 崩溃。探测段首即可判定，整段权限一致。不可读则跳过 CRC（返回
+     * -1，由 GOT/端口/匿名段等通道补充）。 */
+    if (!mem_readable((const void *)mem_info.text_addr, 8)) {
+        LOGD("[CRC] libc .text execute-only (no-read) - skip CRC");
         return -1;
     }
 

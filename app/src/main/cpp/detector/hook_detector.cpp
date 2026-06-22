@@ -112,6 +112,14 @@ static bool check_function_hooked(void *func_addr) {
         return false;
     }
 
+    /* XOM 守卫：部分机型（实测 HONOR KOZ-AL00 / Android 10）把 .text 映射为只执行
+     * 不可读，直接读函数序言会 SEGV_ACCERR 崩溃（issue #2）。不可读则跳过本检查——
+     * 读不到字节不代表被 hook，交由 GOT 指针逃逸等其它通道判定。 */
+    if (!mem_readable(func_addr, 8)) {
+        LOGD("Function prologue not readable (execute-only memory?) - skipping inline check");
+        return false;
+    }
+
     unsigned char *bytes = (unsigned char *)func_addr;
 
 #if defined(__aarch64__)
