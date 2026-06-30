@@ -40,10 +40,6 @@ public class MainActivity extends BaseActivity {
     private TabLayout tabLayout;
     private MainPagerAdapter pagerAdapter;
 
-    private OverviewFragment overviewFragment;
-    private DebugFragment debugFragment;
-    private EnvironmentFragment environmentFragment;
-
     private DebugDetectionManager debugDetectionManager;
     private EnvDetectionManager envDetectionManager;
 
@@ -60,6 +56,26 @@ public class MainActivity extends BaseActivity {
         return mScanClickListener;
     }
 
+    /** 当前是否正在扫描（供 Fragment 在(重)创建时同步按钮状态，避免 recreate 后卡死） */
+    public boolean isScanning() {
+        return scanning;
+    }
+
+    /* ViewPager2 的 FragmentStateAdapter 用 "f"+position 作为 fragment tag。
+     * 实时从 FragmentManager 取「当前显示的」实例，而不是持有可能在 recreate 后失配的引用。 */
+    private OverviewFragment overviewFragment() {
+        androidx.fragment.app.Fragment f = getSupportFragmentManager().findFragmentByTag("f0");
+        return (f instanceof OverviewFragment) ? (OverviewFragment) f : null;
+    }
+    private DebugFragment debugFragment() {
+        androidx.fragment.app.Fragment f = getSupportFragmentManager().findFragmentByTag("f1");
+        return (f instanceof DebugFragment) ? (DebugFragment) f : null;
+    }
+    private EnvironmentFragment environmentFragment() {
+        androidx.fragment.app.Fragment f = getSupportFragmentManager().findFragmentByTag("f2");
+        return (f instanceof EnvironmentFragment) ? (EnvironmentFragment) f : null;
+    }
+
     /** 获取版本号（供其他组件使用） */
     public static String getVersionName() {
         return BuildConfig.VERSION_NAME;
@@ -74,8 +90,9 @@ public class MainActivity extends BaseActivity {
         GitHubReleaseChecker.checkLatestAsync(result -> {
             prefs.edit().putLong("last_github_release_check_ms", System.currentTimeMillis()).apply();
             runOnUiThread(() -> {
-                if (overviewFragment != null) {
-                    overviewFragment.applyVersionCheckResult(result);
+                OverviewFragment of = overviewFragment();
+                if (of != null) {
+                    of.applyVersionCheckResult(result);
                 }
             });
         });
@@ -89,12 +106,8 @@ public class MainActivity extends BaseActivity {
         debugDetectionManager = new DebugDetectionManager();
         envDetectionManager = new EnvDetectionManager(this);
 
-        overviewFragment = new OverviewFragment();
-        debugFragment = new DebugFragment();
-        environmentFragment = new EnvironmentFragment();
-
         pager = findViewById(R.id.pager);
-        pagerAdapter = new MainPagerAdapter(this, overviewFragment, debugFragment, environmentFragment);
+        pagerAdapter = new MainPagerAdapter(this);
         pager.setAdapter(pagerAdapter);
         pager.setOffscreenPageLimit(2);
 
@@ -215,10 +228,15 @@ public class MainActivity extends BaseActivity {
             runOnUiThread(() -> {
                 scanning = false;
                 setScanningUi(false);
-                overviewFragment.setScore(totalScore, maxScore);
-                overviewFragment.setWarningAndAnomalyTags(collectWarningAndAnomalyTags());
-                debugFragment.setResults(lastDebugResults);
-                environmentFragment.setResults(lastEnvResults);
+                OverviewFragment of = overviewFragment();
+                if (of != null) {
+                    of.setScore(totalScore, maxScore);
+                    of.setWarningAndAnomalyTags(collectWarningAndAnomalyTags());
+                }
+                DebugFragment df = debugFragment();
+                if (df != null) df.setResults(lastDebugResults);
+                EnvironmentFragment ef = environmentFragment();
+                if (ef != null) ef.setResults(lastEnvResults);
             });
         }).start();
     }
@@ -239,9 +257,12 @@ public class MainActivity extends BaseActivity {
     }
 
     private void setScanningUi(boolean scanning) {
-        overviewFragment.setScanning(scanning);
-        debugFragment.setScanning(scanning);
-        environmentFragment.setScanning(scanning);
+        OverviewFragment of = overviewFragment();
+        if (of != null) of.setScanning(scanning);
+        DebugFragment df = debugFragment();
+        if (df != null) df.setScanning(scanning);
+        EnvironmentFragment ef = environmentFragment();
+        if (ef != null) ef.setScanning(scanning);
     }
 
     /** 对反调试检测分数应用 1.5x 权重，并做四舍五入。 */

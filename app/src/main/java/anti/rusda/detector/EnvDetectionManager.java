@@ -2,11 +2,15 @@ package anti.rusda.detector;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.Signature;
+import android.hardware.Sensor;
+import android.hardware.SensorManager;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
@@ -91,6 +95,7 @@ public class EnvDetectionManager {
         results.add(detectXposedModules());
         results.add(detectSuspiciousFiles());
         results.add(detectEmulator());
+        results.add(detectCloudPhoneSensors());
         results.add(detectKernelPatch());
         results.add(detectAdbEnhanced());
         results.add(checkProcessStatus());
@@ -667,6 +672,92 @@ public class EnvDetectionManager {
                 Build.HARDWARE, Build.PRODUCT, Build.DEVICE, Build.BRAND);
         return fromNativeResult("Emulator", raw,
                 "Running on physical device", "Device appears to be physical");
+    }
+
+    /** 传感器厂商/名称里的模拟器/云手机特征关键词 */
+    private static final String[] FAKE_SENSOR_KEYWORDS = {
+            "goldfish", "ranchu", "aosp", "the android open source project",
+            "genymotion", "virtualbox", "vbox", "generic", "qemu",
+            "cuttlefish", "vsoc", "redroid", "nox", "ldplayer", "mumu", "bluestacks"
+    };
+
+    /**
+     * 云手机 / 传感器 / 硬件真实性检测（运行时角度，区别于基于 Build/文件的 Emulator 项）。
+     *
+     * 物理真机有一整套真实传感器（加速度计几乎必有，通常还有陀螺仪/磁力计/光线/距离等十余个），
+     * 电池有真实温度/电压。云手机与模拟器往往：传感器极少或缺加速度计、传感器厂商名为
+     * Goldfish/AOSP 等、电池温度/电压恒为 0。聚合多信号判定。WARNING 级（与 Emulator 一致）。
+     */
+    private DetectionResult detectCloudPhoneSensors() {
+        List<String> details = new ArrayList<>();
+        int strong = 0, weak = 0;
+        if (context == null) {
+            details.add("Context unavailable");
+            return new DetectionResult("Cloud Phone / Sensors", "Check skipped", DetectionResult.STATUS_NORMAL, 8, details, true);
+        }
+
+        /* 1. 传感器 */
+        try {
+            SensorManager sm = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
+            if (sm != null) {
+                List<Sensor> all = sm.getSensorList(Sensor.TYPE_ALL);
+                int count = all != null ? all.size() : 0;
+                details.add("Sensor count: " + count);
+                boolean hasAccel = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null;
+                boolean hasGyro = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null;
+                details.add("Accelerometer: " + (hasAccel ? "present" : "MISSING") + ", Gyroscope: " + (hasGyro ? "present" : "missing"));
+
+                if (!hasAccel) { details.add("No accelerometer - almost never a real phone"); strong++; }
+                if (count == 0) { details.add("Zero sensors reported"); strong++; }
+                else if (count < 5) { details.add("Very few sensors (<5)"); weak++; }
+                if (!hasGyro) weak++;
+
+                /* 传感器厂商/名称特征 */
+                if (all != null) {
+                    String hit = null;
+                    for (Sensor s : all) {
+                        String blob = ((s.getVendor() == null ? "" : s.getVendor()) + " " +
+                                       (s.getName() == null ? "" : s.getName())).toLowerCase(Locale.US);
+                        for (String kw : FAKE_SENSOR_KEYWORDS) {
+                            if (blob.contains(kw)) { hit = s.getName() + " / " + s.getVendor(); break; }
+                        }
+                        if (hit != null) break;
+                    }
+                    if (hit != null) { details.add("Emulator-style sensor: " + hit); strong++; }
+                }
+            } else {
+                details.add("SensorManager unavailable");
+                weak++;
+            }
+        } catch (Throwable t) {
+            details.add("Sensor check error: " + t.getClass().getSimpleName());
+        }
+
+        /* 2. 电池硬件（sticky ACTION_BATTERY_CHANGED，无需权限） */
+        try {
+            Intent bat = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (bat != null) {
+                int temp = bat.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1);   // 0.1°C
+                int volt = bat.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1);        // mV
+                String tech = bat.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY);
+                details.add("Battery: temp=" + (temp / 10.0) + "°C, voltage=" + volt + "mV, tech=" + tech);
+                if (temp <= 0 && volt <= 0) { details.add("Battery temp & voltage both zero (virtualized?)"); weak++; }
+                if (tech == null || tech.isEmpty() || "unknown".equalsIgnoreCase(tech)) weak++;
+            } else {
+                details.add("Battery info unavailable");
+            }
+        } catch (Throwable t) {
+            details.add("Battery check error: " + t.getClass().getSimpleName());
+        }
+
+        /* 3. 聚合：任一强信号，或 ≥2 弱信号 → 疑似云手机/模拟器 */
+        boolean suspect = (strong >= 1) || (weak >= 2);
+        int status = suspect ? DetectionResult.STATUS_WARNING : DetectionResult.STATUS_NORMAL;
+        String summary = suspect
+                ? "Cloud phone / emulator indicators (sensors/hardware)"
+                : "Sensors & hardware look like a real device";
+        if (!suspect) details.add("No strong virtualized-hardware indicators");
+        return new DetectionResult("Cloud Phone / Sensors", summary, status, 8, details);
     }
 
     private DetectionResult checkProcessStatus() {

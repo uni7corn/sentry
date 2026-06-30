@@ -18,7 +18,7 @@
   - [D9. ArtMethod Entry](#d9-artmethod-entry)
   - [D10. Hook Trap](#d10-hook-trap)
   - [D11. Dirty Page / Memory Injection](#d11-dirty-page--memory-injection)
-- [Environment Tab · 10 项](#environment-tab--10-项)
+- [Environment Tab · 12 项](#environment-tab--12-项)
   - [E1. App Signature](#e1-app-signature)
   - [E2. Bootloader](#e2-bootloader)
   - [E3. Magisk / Root](#e3-magisk--root)
@@ -30,6 +30,7 @@
   - [E9. Multi-instance](#e9-multi-instance)
   - [E10. Container / Virtualization](#e10-container--virtualization)
   - [E11. APK Repack Guard（防改包 / 反签名伪装）](#e11-apk-repack-guard防改包--反签名伪装)
+  - [E12. Cloud Phone / Sensors（云手机 / 传感器·硬件真实性）](#e12-cloud-phone--sensors云手机--传感器硬件真实性)
 - [平台覆盖与已知限制](#平台覆盖与已知限制)
 
 ---
@@ -50,7 +51,7 @@ max   = Σ(debug_item.max    × 1.5) + Σ(env_item.max)
 percent = round(100 × score / max)
 ```
 
-- 单项满分：默认 10；`Bootloader`/`App Signature`/`APK Repack Guard` 15、`Magisk/Root` 12、`Kernel Patch` 10、`Container` 8、`Dangerous Apps`/`ADB Debug`/`Multi-instance`/`Suspicious Files`/`Emulator` 5。
+- 单项满分：默认 10；`Bootloader`/`App Signature`/`APK Repack Guard` 15、`Magisk/Root` 12、`Kernel Patch` 10、`Container`/`Cloud Phone / Sensors` 8、`Dangerous Apps`/`ADB Debug`/`Multi-instance`/`Suspicious Files`/`Emulator` 5。
 - `STATUS_NORMAL → maxScore`；`STATUS_WARNING → maxScore/2`（`warnOnly` 时仍取 maxScore）；`STATUS_DANGER → 0`。
 - 调试域 1.5× 权重在 [`MainActivity.applyDebugScoreWeight`](../app/src/main/java/anti/rusda/MainActivity.java)；调整权重时务必同步更新本文。
 
@@ -59,10 +60,10 @@ percent = round(100 × score / max)
 | 维度 | 项目数 | 单项 maxScore 累计 | × 权重 | 域满分 |
 |---|---|---|---|---|
 | Debug | 11 | 11 × 10 = 110 | × 1.5 | **165** |
-| Environment | 11 | 15+15+15+12+10+10+10+5+5+5+8 = 110 | × 1 | **110** |
-| **总计** | 22 | — | — | **275** |
+| Environment | 12 | 15+15+15+12+10+10+10+8+5+5+5+8 = 118 | × 1 | **118** |
+| **总计** | 23 | — | — | **283** |
 
-> 即首页"100"代表 `score/275 = 100%`。环境域含两项签名相关检测：E1 走 PackageManager、E11 走文件级解析（反签名伪装）。
+> 即首页"100"代表 `score/283 = 100%`。环境域含两项签名相关检测：E1 走 PackageManager、E11 走文件级解析（反签名伪装）。
 
 ---
 
@@ -263,7 +264,7 @@ percent = round(100 × score / max)
 
 ---
 
-## Environment Tab · 11 项
+## Environment Tab · 12 项
 
 ### E1. App Signature
 
@@ -431,6 +432,27 @@ E1「App Signature」走 `PackageManager.getPackageInfo(GET_SIGNING_CERTIFICATES
 - 合法 APK 上：文件 == PackageManager == 预期 → PASS。
 - 另一把 key 重签副本后证书 SHA-256 变为 `0152e6e5…`，与预期不符 → 防改包路必触发。
 - 防改包还有 [`SentryApp.onCreate`](../app/src/main/java/anti/rusda/SentryApp.java) 启动期闸门兜底：重签后 PackageManager 签名（真实新 key）≠ 预期 → 进程在最早阶段自杀，业务层根本不执行。
+
+### E12. Cloud Phone / Sensors（云手机 / 传感器·硬件真实性）
+
+| 字段 | 值 |
+|---|---|
+| 实现 | [`EnvDetectionManager.detectCloudPhoneSensors()`](../app/src/main/java/anti/rusda/detector/EnvDetectionManager.java) |
+| maxScore | 8 |
+| 状态 | 任一强信号或 ≥2 弱信号 → WARNING；否则 NORMAL |
+
+**与 E6 Emulator 的区别**：E6 看 `Build.*` 属性与模拟器特征文件（静态指纹），本项从**运行时硬件**角度判定——传感器与电池是云手机/模拟器最难伪造齐全的部分。
+
+**信号**（Java framework API，无需特殊权限）：
+- **传感器**（`SensorManager`）：
+  - 总数 `getSensorList(TYPE_ALL)`——物理真机通常十余个；为 0（强）或 <5（弱）可疑。
+  - 关键传感器：缺**加速度计**几乎不可能是真机（强信号）；缺陀螺仪为弱信号（部分低端机本就没有）。
+  - 传感器**厂商/名称**含 `goldfish`/`ranchu`/`aosp`/`the android open source project`/`genymotion`/`vbox`/`generic`/`qemu`/`cuttlefish`/`vsoc`/`redroid`/`nox`/`ldplayer`/`mumu`/`bluestacks`（强信号——模拟器传感器典型命名）。
+- **电池**（sticky `ACTION_BATTERY_CHANGED`）：温度与电压**同时为 0**、或 technology 为空/unknown（弱信号——虚拟化环境常见）。
+
+**判定**：强信号 ≥1 或弱信号 ≥2 → WARNING。阈值偏保守以避免低端真机误报（实测 Pixel 6 Pro 判 NORMAL）。
+
+**已知限制**：高仿云手机可注入伪造传感器列表与电池数据来绕过；本项是多通道之一，配合 E6 与 native 匿名内存/容器检测交叉印证，不单独作为判据。
 
 ---
 

@@ -222,7 +222,11 @@ public class OverviewFragment extends Fragment {
 
     private void bindScanButton() {
         if (scanButton != null && getActivity() instanceof MainActivity) {
-            scanButton.setOnClickListener(((MainActivity) getActivity()).getScanClickListener());
+            MainActivity a = (MainActivity) getActivity();
+            scanButton.setOnClickListener(a.getScanClickListener());
+            // 同步当前真实扫描态：recreate(切主题/语言)后新建/恢复的 fragment 据此恢复按钮可点性，
+            // 不再被旧实例遗留的 disabled 状态卡死。
+            setScanning(a.isScanning());
         }
     }
 
