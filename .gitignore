@@ -61,3 +61,5 @@ Thumbs.db
 local-build/
 build_in_wsl.sh
 build_harden.sh
+repack_test.sh
+control_sign.sh
