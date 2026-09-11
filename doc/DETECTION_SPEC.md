@@ -18,7 +18,7 @@
   - [D9. ArtMethod Entry](#d9-artmethod-entry)
   - [D10. Hook Trap](#d10-hook-trap)
   - [D11. Dirty Page / Memory Injection](#d11-dirty-page--memory-injection)
-- [Environment Tab · 12 项](#environment-tab--12-项)
+- [Environment Tab · 16 项](#environment-tab--16-项)
   - [E1. App Signature](#e1-app-signature)
   - [E2. Bootloader](#e2-bootloader)
   - [E3. Magisk / Root](#e3-magisk--root)
@@ -32,6 +32,9 @@
   - [E11. APK Repack Guard（防改包 / 反签名伪装）](#e11-apk-repack-guard防改包--反签名伪装)
   - [E12. Cloud Phone / Sensors（云手机 / 传感器·硬件真实性）](#e12-cloud-phone--sensors云手机--传感器硬件真实性)
   - [E13. Signature Bypass Footprint（签名绕过足迹）](#e13-signature-bypass-footprint签名绕过足迹)
+  - [E14. Key Attestation Trust（证书链强校验）](#e14-key-attestation-trust证书链强校验)
+  - [E15. Device Fingerprint Spoof（设备指纹伪装）](#e15-device-fingerprint-spoof设备指纹伪装)
+  - [E16. Play Integrity (Local)（本地近似）](#e16-play-integrity-local本地近似)
 - [平台覆盖与已知限制](#平台覆盖与已知限制)
 
 ---
@@ -52,7 +55,7 @@ max   = Σ(debug_item.max    × 1.5) + Σ(env_item.max)
 percent = round(100 × score / max)
 ```
 
-- 单项满分：默认 10；`Bootloader`/`App Signature`/`APK Repack Guard` 15、`Magisk/Root` 12、`Signature Bypass Footprint` 12、`Kernel Patch` 10、`Container`/`Cloud Phone / Sensors` 8、`Dangerous Apps`/`ADB Debug`/`Multi-instance`/`Suspicious Files`/`Emulator` 5。
+- 单项满分：默认 10；`Bootloader`/`App Signature`/`APK Repack Guard`/`Key Attestation Trust` 15、`Magisk/Root` 12、`Signature Bypass Footprint`/`Device Fingerprint Spoof` 12、`Kernel Patch`/`Play Integrity (Local)` 10（后者 warnOnly）、`Container`/`Cloud Phone / Sensors` 8、`Dangerous Apps`/`ADB Debug`/`Multi-instance`/`Suspicious Files`/`Emulator` 5。
 - `STATUS_NORMAL → maxScore`；`STATUS_WARNING → maxScore/2`（`warnOnly` 时仍取 maxScore）；`STATUS_DANGER → 0`。
 - 调试域 1.5× 权重在 [`MainActivity.applyDebugScoreWeight`](../app/src/main/java/anti/rusda/MainActivity.java)；调整权重时务必同步更新本文。
 
@@ -61,10 +64,10 @@ percent = round(100 × score / max)
 | 维度 | 项目数 | 单项 maxScore 累计 | × 权重 | 域满分 |
 |---|---|---|---|---|
 | Debug | 11 | 11 × 10 = 110 | × 1.5 | **165** |
-| Environment | 13 | 15+15+15+12+10+10+10+8+5+5+5+8+12 = 130 | × 1 | **130** |
-| **总计** | 24 | — | — | **295** |
+| Environment | 16 | 130 + 15（E14 Attestation Trust）+ 12（E15 Fingerprint Spoof）+ 10（E16 Play Integrity, warnOnly）= 167 | × 1 | **167** |
+| **总计** | 27 | — | — | **332** |
 
-> 即首页"100"代表 `score/295 = 100%`。环境域含三项签名相关检测：E1 走 PackageManager、E11 走文件级解析（反签名伪装）、E13 查"绕过本身"的结构足迹（多通道一致性 + CreatorProxy/PmProxy/factory 劫持/fd·inode 重定向/seccomp 一致性）。
+> 即首页"100"代表 `score/332 = 100%`。环境域含三项签名相关检测：E1 走 PackageManager、E11 走文件级解析（反签名伪装）、E13 查"绕过本身"的结构足迹（多通道一致性 + CreatorProxy/PmProxy/factory 劫持/fd·inode 重定向/seccomp 一致性）。E16 Play Integrity 本地版为 `warnOnly` 且封顶 WARNING，对分数中性（避免与 Bootloader/Root/Attestation 重复计分）。
 
 ---
 
@@ -265,7 +268,7 @@ percent = round(100 × score / max)
 
 ---
 
-## Environment Tab · 13 项
+## Environment Tab · 16 项
 
 ### E1. App Signature
 
@@ -482,6 +485,68 @@ E1 比对 PackageManager 报告值、E11 比对 APK 文件解析值，二者都�
 **判定**：六路中任一硬信号（通道分裂 / Creator 仿冒 / mPM 被代理 / factory 劫持 / inode 不一致 / seccomp 不一致）→ DANGER；探针因平台限制取不到值（如 maps 无本包映射、老内核无 `Seccomp:` 行）一律按"跳过"处理，**不下危险结论**，以保证真机零误报（实测 Pixel 6 Pro 六路全 PASS）。
 
 **与 E1 / E11 的关系**：E1 = PackageManager 快速路径 + 启动期 fail-fast；E11 = 文件级 ground truth + 反伪装；E13 = 不依赖签名值的结构级反绕过。三者层层递进，针对的是"伪造签名值"无法掩盖的运行时痕迹。
+
+---
+
+### E14. Key Attestation Trust（证书链强校验）
+
+| 字段 | 值 |
+|---|---|
+| 实现 | [`KeyAttestationHelper.runFullAttestation()` → `fillTrust()`](../app/src/main/java/anti/rusda/detector/KeyAttestationHelper.java)；[`EnvDetectionManager.detectAttestationTrust()`](../app/src/main/java/anti/rusda/detector/EnvDetectionManager.java) |
+| maxScore | 15 |
+| 状态 | 链断/挑战不符/命中吊销 → DANGER；软件级/根未命中/appId 不符 → WARNING（软件级且根未命中 → 升级 DANGER）；扩展缺失/API<28 → 跳过不判危险 |
+
+**为什么需要它（Bootloader 项之外的第二层）**：Bootloader 项只解析 RootOfTrust（`deviceLocked`/`verifiedBootState`），只看"链结构 + RootOfTrust"识不破**泄露/伪造 keybox**——伪造链同样 chain 到 Google 根、`deviceLocked=true`，全套"受信任"。本项对同一次 attestation 的证书链做真正的信任校验。
+
+**六路强校验**：
+1. **链密码学逐级验签**：`chain[i].verify(chain[i+1].getPublicKey())` 全链验证；断链 → 伪造/损坏（DANGER）。
+2. **根证书 pinning**：链末公钥须命中内置 Google 硬件认证根集合（`assets/attestation/google_roots.json`）；未命中 → WARNING（可能新根或非 Google）。
+3. **挑战值核对**：解析扩展内 `attestationChallenge` == 本次 32 字节随机挑战；不等 → 回放/借用的罐装链（DANGER）。
+4. **安全级别**：解析 `attestationSecurityLevel`（Software/TEE/StrongBox），**替换以往写死的 `hardwareBacked=Yes`**；Software 级 → WARNING。
+5. **吊销核对**：每张 cert 取 `serialNumber.toString(16)` 查 Google attestation status list（`KEY_COMPROMISE`/`SOFTWARE_FLAW`）；命中 → 泄露 keybox（DANGER）。名单：内置快照 `assets/attestation/status.json` + 后台 best-effort 联网刷新（`https://android.googleapis.com/attestation/status`），完全离线亦可工作。
+6. **attestationApplicationId**：核对包名，识破借用他 App 的链；不符 → WARNING。
+
+**刻意规避的误报**：本项用 `PURPOSE_SIGN`（非 `PURPOSE_ATTEST_KEY`），不走 attest-key 模式，故不会撞上 KeyMint 给 attest-key 证书发空 `KeyUsage`（RFC 违规）导致的"不受信任"——那与 keybox 好坏无关，**不作为伪造信号**。
+
+---
+
+### E15. Device Fingerprint Spoof（设备指纹伪装）
+
+| 字段 | 值 |
+|---|---|
+| 实现 | [`env_detector.cpp:env_detect_fingerprint_spoof()`](../app/src/main/cpp/detector/env_detector.cpp)（`nativeGetProp` 单值）；[`EnvDetectionManager.detectFingerprintSpoof()`](../app/src/main/java/anti/rusda/detector/EnvDetectionManager.java) |
+| maxScore | 12 |
+| 状态 | 自洽/跨分区/主-分区不一致 → DANGER；全设备一致非零售(AOSP/eng) → WARNING；一致 stock → NORMAL |
+
+**攻击面**：改包工具把 `ro.build.fingerprint`（Java 可见）改成 stock Pixel 串，却漏改 per-partition 属性——`ro.product/system/system_ext/vendor.build.fingerprint` 仍暴露 `aosp_raven`/`eng.r`/`BP1A...`/`test-keys`。仅关键词匹配的 Emulator 项抓不到这种"部分改包"。
+
+**检测（白名单无关，只做内部一致性 + 已知坏标记，零机型库、低误报）**：
+1. **主指纹自洽**：按 `brand/product/device:release/id/incremental:type/tags` 拆解 `ro.build.fingerprint`，比对拆出的 id/incremental/type/tags 与 `ro.build.{id,version.incremental,type,tags}`；不一致 → 改了属性没改指纹 → DANGER。
+2. **跨核心分区一致**：`ro.{system,system_ext,product}.build.id` 出现 >1 个不同值 → 分区来自不同构建 → DANGER。
+3. **非零售标记**：对各分区 `ro.<P>.build.{fingerprint,type,tags,version.incremental}`（P ∈ system/system_ext/product/vendor/odm/bootimage）扫 `type∈{eng,userdebug}`/`test-keys`/`dev-keys`/`aosp`/`eng.` incremental；主指纹"像 stock"但某分区命中 → 隐藏 AOSP 于 stock 表皮（DANGER）；全部一致命中 → 诚实 AOSP/自编译（WARNING）。
+4. **Java 交叉核对**：`Build.FINGERPRINT` vs Native `ro.build.fingerprint`（揭穿晚期 resetprop / Java 层 hook）；并用 `Build.{ID,TYPE,TAGS,VERSION.INCREMENTAL}` 核对 `Build.FINGERPRINT` 拆解字段（抓只改指纹串未改独立字段的 Java 伪装）。
+
+Native 属性读取走 `__system_property_read_callback`（同 Bootloader 项，抗部分 hook）。
+
+---
+
+### E16. Play Integrity (Local)（本地近似）
+
+| 字段 | 值 |
+|---|---|
+| 实现 | [`PlayIntegrityHelper.evaluate()`](../app/src/main/java/anti/rusda/detector/PlayIntegrityHelper.java)；[`EnvDetectionManager.detectPlayIntegrity()`](../app/src/main/java/anti/rusda/detector/EnvDetectionManager.java) |
+| maxScore | 10（`warnOnly`，封顶 WARNING，对分数中性） |
+| 状态 | 缺 GMS/GMS 签名不符/本地 DEVICE 不达标 → WARNING（不扣分）；否则 NORMAL |
+
+**范围**：真正的 Play Integrity 令牌由 Google Play 服务签发、需服务端（配 Cloud 项目号）解码才有权威结论，App 本地无法自证；本项做 Play Integrity 依赖的**本地可观测信号**并给出**近似**裁决（明确标注为近似，不请求真令牌）。
+
+**信号**：
+1. **Play 组件**：GMS（`com.google.android.gms`）/ Play Store（`com.android.vending`）安装/启用/版本；缺 GMS → 设备几乎必然过不了 Play Integrity。
+2. **GMS 签名核对**：GMS 签名 SHA-256 == Google 官方证书（识破 microG / 伪 GMS）。
+3. **Play Protect（Verify Apps）**：`Settings.Global.package_verifier_enable` / `package_verifier_user_consent`。
+4. **本地聚合 MEETS_BASIC / DEVICE / STRONG_INTEGRITY**：复用 E14 强校验结果（链可信 + 未吊销 + `deviceLocked` + `verifiedBoot` + 硬件级）、E15 指纹未伪装、Emulator、安全补丁新旧，近似映射三档裁决。
+
+`warnOnly` 且封顶 WARNING：避免与 Bootloader/Root/Attestation Trust 重复计分。
 
 ---
 

@@ -83,6 +83,10 @@ public class EnvDetectionManager {
     private static native int nativeApkFdInodeConsistent(String apkPath);
     /** seccomp prctl 与 /proc/self/status 一致性（揭穿伪造 status）：1=一致，0=不一致(DANGER)，<0=无法判定 */
     private static native int nativeSeccompConsistent();
+    /** 设备指纹伪装检测（per-partition 属性一致性 + eng/aosp/test-keys 标记）；返回 [status, summary, detail...] */
+    private static native String[] nativeDetectFingerprintSpoof();
+    /** 读取单个系统属性（Native __system_property_read_callback，抗部分 hook）；失败返回空串 */
+    private static native String nativeGetProp(String name);
 
     private final Context context;
 
@@ -92,17 +96,25 @@ public class EnvDetectionManager {
 
     public List<DetectionResult> runAllDetections() {
         List<DetectionResult> results = new ArrayList<>();
+        /* 一次性生成 attestation 结果，供 Bootloader / Attestation Trust / Play Integrity 共享（避免多把密钥） */
+        KeyAttestationHelper.AttestationReport ar = KeyAttestationHelper.runFullAttestation(context);
+
         results.add(detectAppSignature());
         results.add(detectApkTamper());
         results.add(detectSignatureBypass());
-        results.add(detectBootloader());
+        results.add(detectBootloader(ar));
+        results.add(detectAttestationTrust(ar));
         results.add(detectRoot());
         results.add(detectXposedModules());
         results.add(detectSuspiciousFiles());
-        results.add(detectEmulator());
+        DetectionResult emulator = detectEmulator();
+        results.add(emulator);
+        DetectionResult fingerprint = detectFingerprintSpoof();
+        results.add(fingerprint);
         results.add(detectCloudPhoneSensors());
         results.add(detectKernelPatch());
         results.add(detectAdbEnhanced());
+        results.add(detectPlayIntegrity(ar, fingerprint.getStatus(), emulator.getStatus()));
         results.add(checkProcessStatus());
         results.add(detectContainer());
         return results;
@@ -452,7 +464,7 @@ public class EnvDetectionManager {
      * Bootloader 检测：合并 Native 系统属性 + Key Attestation（TEE RootOfTrust）。
      * 包含 verifiedBootKey、deviceLocked、verifiedBootState、verifiedBootHash 等硬件级证明。
      */
-    private DetectionResult detectBootloader() {
+    private DetectionResult detectBootloader(KeyAttestationHelper.AttestationReport ar) {
         /* 1. Native 层：AVB 系统属性（verifiedbootstate、flash.locked、veritymode、avb_version 等） */
         String[] nativeRaw = nativeDetectBootloader();
         int statusNat = DetectionResult.STATUS_NORMAL;
@@ -507,21 +519,14 @@ public class EnvDetectionManager {
             }
         }
 
-        /* 2. Key Attestation：TEE RootOfTrust（deviceLocked、verifiedBootState、verifiedBootKey、verifiedBootHash） */
-        String[] attestRaw = KeyAttestationHelper.runAttestationSync();
-        int statusAtt = DetectionResult.STATUS_NORMAL;
-        if (attestRaw != null && attestRaw.length >= 2) {
-            try {
-                statusAtt = Integer.parseInt(attestRaw[0]);
-            } catch (NumberFormatException ignored) { }
-            details.add("═══ Key Attestation (TEE RootOfTrust) ═══");
-            if (attestRaw.length > 2) {
-                details.addAll(Arrays.asList(Arrays.copyOfRange(attestRaw, 2, attestRaw.length)));
-            } else {
-                details.add(attestRaw[1]);
-            }
+        /* 2. Key Attestation：TEE RootOfTrust（deviceLocked、verifiedBootState、verifiedBootKey、verifiedBootHash）
+         * 复用 runAllDetections 里一次生成的 AttestationReport（同一次运行也供 Attestation Trust / Play Integrity） */
+        int statusAtt;
+        details.add("═══ Key Attestation (TEE RootOfTrust) ═══");
+        if (ar != null && ar.rootLines != null && !ar.rootLines.isEmpty()) {
+            statusAtt = ar.rootStatus;
+            details.addAll(ar.rootLines);
         } else {
-            details.add("═══ Key Attestation (TEE RootOfTrust) ═══");
             details.add("Key attestation unavailable or failed");
             statusAtt = DetectionResult.STATUS_WARNING;
         }
@@ -541,6 +546,112 @@ public class EnvDetectionManager {
         DetectionResult result = new DetectionResult("Bootloader", summary, status, 15);
         result.setDetails(details.isEmpty() ? Collections.singletonList("No issues detected") : details);
         return result;
+    }
+
+    /**
+     * Key Attestation 强校验（E15）：不止看链结构 + RootOfTrust，而是密码学验链、根证书 pinning、
+     * 挑战值核对、吊销名单核对、安全级别、attestationApplicationId 绑定——识破泄露/伪造 keybox、
+     * 回放的罐装链、软件级伪装。复用 runAllDetections 里一次生成的 AttestationReport。
+     */
+    private DetectionResult detectAttestationTrust(KeyAttestationHelper.AttestationReport ar) {
+        List<String> details = new ArrayList<>();
+        int status;
+        String summary;
+        if (ar != null && ar.trustLines != null && !ar.trustLines.isEmpty()) {
+            status = ar.trustStatus;
+            summary = ar.trustSummary;
+            details.addAll(ar.trustLines);
+        } else {
+            status = DetectionResult.STATUS_WARNING;
+            summary = "Attestation trust check unavailable";
+            details.add("Attestation report unavailable");
+        }
+        return new DetectionResult("Key Attestation Trust", summary, status, 15, details);
+    }
+
+    /**
+     * 设备指纹伪装（E14）：Native per-partition 属性一致性 + eng/aosp/test-keys 标记，
+     * 叠加 Java 侧 Build.* 与 Native 属性交叉核对（多通道）。白名单无关、低误报。
+     */
+    private DetectionResult detectFingerprintSpoof() {
+        List<String> details = new ArrayList<>();
+        int status = DetectionResult.STATUS_NORMAL;
+
+        /* 1) Native 层：per-partition 一致性 + 非零售标记 */
+        String[] raw = null;
+        try { raw = nativeDetectFingerprintSpoof(); } catch (Throwable ignored) { }
+        details.add("═══ Native (per-partition props) ═══");
+        if (raw != null && raw.length >= 2) {
+            try { status = Integer.parseInt(raw[0]); } catch (NumberFormatException ignored) { }
+            if (raw.length > 2) {
+                for (int i = 2; i < raw.length; i++) {
+                    if (raw[i] != null && !raw[i].isEmpty()) details.add(raw[i]);
+                }
+            }
+        } else {
+            details.add("Native fingerprint check unavailable");
+        }
+
+        /* 2) Java 交叉核对：Build.FINGERPRINT vs Native ro.build.fingerprint（揭穿晚期 resetprop / Java 层 hook） */
+        details.add("═══ Java cross-check ═══");
+        String javaFp = Build.FINGERPRINT != null ? Build.FINGERPRINT : "";
+        String nativeFp = "";
+        try { nativeFp = nativeGetProp("ro.build.fingerprint"); } catch (Throwable ignored) { }
+        if (nativeFp == null) nativeFp = "";
+        if (!javaFp.isEmpty() && !nativeFp.isEmpty() && !javaFp.equals(nativeFp)) {
+            details.add("Build.FINGERPRINT != native ro.build.fingerprint (late resetprop or Java hook)");
+            details.add("  Java  : " + javaFp);
+            details.add("  Native: " + nativeFp);
+            status = DetectionResult.STATUS_DANGER;
+        } else if (!javaFp.isEmpty()) {
+            details.add("Build.FINGERPRINT matches native prop");
+        }
+
+        /* 3) Java 层 Build.FINGERPRINT 自洽（抓只改指纹串未改 Build 独立字段的伪装） */
+        String mismatch = fingerprintFieldMismatch(javaFp);
+        if (mismatch != null) {
+            details.add("Build.FINGERPRINT field mismatch: " + mismatch);
+            status = DetectionResult.STATUS_DANGER;
+        }
+
+        String summary = status == DetectionResult.STATUS_DANGER
+                ? "Fingerprint spoof / partial repackage detected"
+                : status == DetectionResult.STATUS_WARNING
+                ? "Non-retail build (AOSP / eng / test-keys)"
+                : "Build fingerprint consistent across partitions";
+        return new DetectionResult("Device Fingerprint Spoof", summary, status, 12, details);
+    }
+
+    /** 用 Build.* 独立字段核对 Build.FINGERPRINT 的 id/incremental/type/tags；不一致返回描述，否则 null。 */
+    private static String fingerprintFieldMismatch(String fp) {
+        if (fp == null || fp.isEmpty()) return null;
+        /* brand/product/device:release/id/incremental:type/tags —— 以 '/' 或 ':' 分隔应得 8 段 */
+        String[] t = fp.split("[/:]");
+        if (t.length != 8) return null;  // 非标准格式，跳过（避免误报）
+        StringBuilder sb = new StringBuilder();
+        checkFpField(sb, "id", t[4], Build.ID);
+        checkFpField(sb, "incremental", t[5], Build.VERSION.INCREMENTAL);
+        checkFpField(sb, "type", t[6], Build.TYPE);
+        checkFpField(sb, "tags", t[7], Build.TAGS);
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
+    private static void checkFpField(StringBuilder sb, String label, String fromFp, String fromBuild) {
+        if (fromFp == null || fromBuild == null || fromFp.isEmpty() || fromBuild.isEmpty()) return;
+        if (!fromFp.equals(fromBuild)) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(label).append(" '").append(fromFp).append("' vs Build.")
+              .append(label.toUpperCase(Locale.ROOT)).append(" '").append(fromBuild).append("'");
+        }
+    }
+
+    /**
+     * Play Integrity 本地版（E16）：Play 组件/签名、Play Protect，及本地聚合 BASIC/DEVICE/STRONG 近似裁决。
+     * warnOnly 且封顶 WARNING（纯参考，不与 Bootloader/Root/Attestation 重复扣分）。详见 {@link PlayIntegrityHelper}。
+     */
+    private DetectionResult detectPlayIntegrity(KeyAttestationHelper.AttestationReport ar,
+                                                int fingerprintStatus, int emulatorStatus) {
+        return PlayIntegrityHelper.evaluate(context, ar, fingerprintStatus, emulatorStatus);
     }
 
     /** 将 Native 层返回的 String[] 转为 DetectionResult。格式: [status, summary, detail0, ...]；无法执行时显示 Check skipped、不扣分 */

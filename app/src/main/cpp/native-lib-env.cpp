@@ -202,6 +202,27 @@ static jint JNICALL e14(JNIEnv *env, jclass) {  /* nativeSeccompConsistent */
     return seccomp_prctl_status_consistent();
 }
 
+static jobjectArray JNICALL e15(JNIEnv *env, jclass) {  /* nativeDetectFingerprintSpoof */
+    char details[MAX_DETAILS][256];
+    int status = 0;
+    int n = env_detect_fingerprint_spoof(&status, details, MAX_DETAILS);
+    const char *summary = (status == 2) ? "Fingerprint spoof / partial repackage detected"
+        : (status == 1) ? "Non-retail build (AOSP / eng / test-keys)"
+        : "Build fingerprint consistent across partitions";
+    return buildResult(env, status, summary, details, n);
+}
+
+static jstring JNICALL e16(JNIEnv *env, jclass, jstring jName) {  /* nativeGetProp */
+    if (!jName) return env->NewStringUTF("");
+    const char *name = env->GetStringUTFChars(jName, nullptr);
+    if (!name) return env->NewStringUTF("");
+    char buf[256];
+    buf[0] = '\0';
+    env_read_prop(name, buf, sizeof(buf));
+    env->ReleaseStringUTFChars(jName, name);
+    return env->NewStringUTF(buf);
+}
+
 static const JNINativeMethod kEnvMethods[] = {
     { "nativeGetEnvVersion",            "()Ljava/lang/String;",                                                              (void *)e0 },
     { "nativeDetectMagisk",             "()[Ljava/lang/String;",                                                             (void *)e2 },
@@ -216,6 +237,8 @@ static const JNINativeMethod kEnvMethods[] = {
     { "nativeDetectEmulator",           "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;", (void *)e12 },
     { "nativeApkFdInodeConsistent",     "(Ljava/lang/String;)I",                                                            (void *)e13 },
     { "nativeSeccompConsistent",        "()I",                                                                              (void *)e14 },
+    { "nativeDetectFingerprintSpoof",   "()[Ljava/lang/String;",                                                             (void *)e15 },
+    { "nativeGetProp",                  "(Ljava/lang/String;)Ljava/lang/String;",                                           (void *)e16 },
 };
 static const JNINativeMethod kDbgMethods[] = {
     { "nativeDetectZygiskInjection",    "()[Ljava/lang/String;", (void *)e4 },

@@ -415,6 +415,189 @@ char *env_read_proc_version(void) {
     return buf;
 }
 
+/* ── Device fingerprint spoof detection ─────────────────────────────────────
+ * 只做"内部一致性 + 已知坏标记"，不维护正确值白名单（零机型库、低误报）：
+ *   1) 主 ro.build.fingerprint 自洽：拆解出的 id/incremental/type/tags 应与独立属性一致
+ *   2) 跨核心分区(system/system_ext/product) build.id 应一致
+ *   3) 主指纹"像 stock"但某分区暴露 eng/aosp/test-keys → 部分伪装(DANGER)；
+ *      全部一致地非零售 → 诚实 AOSP/自编译(WARNING)
+ * read_prop 走 __system_property_read_callback，抗部分 hook。 */
+#if defined(__ANDROID__)
+
+/* 以 '/' 或 ':' 为分隔把 fingerprint 拆成至多 8 段：
+ * brand/product/device:release/id/incremental:type/tags。返回实际段数(可能>8)。 */
+static int fp_split(const char *fp, char toks[8][160]) {
+    int ti = 0, ci = 0;
+    for (const char *p = fp;; ++p) {
+        char c = *p;
+        if (c == '/' || c == ':' || c == '\0') {
+            if (ti < 8) toks[ti][ci] = '\0';
+            ti++;
+            ci = 0;
+            if (c == '\0') break;
+        } else if (ti < 8 && ci < 159) {
+            toks[ti][ci++] = c;
+        }
+    }
+    return ti;
+}
+
+static bool fp_has_ci(const char *hay, const char *needle) {
+    return hay && hay[0] && my_strcasestr(hay, needle) != nullptr;
+}
+static bool fp_is_eng_type(const char *t) {
+    return my_strcmp(t, "eng") == 0 || my_strcmp(t, "userdebug") == 0;
+}
+static bool fp_is_eng_incr(const char *i) {
+    return my_strncmp(i, "eng.", 4) == 0 || my_strcmp(i, "eng") == 0;
+}
+static bool fp_has_testkeys(const char *tags) {
+    return fp_has_ci(tags, "test-keys") || fp_has_ci(tags, "dev-keys");
+}
+/* 该分区/主体是否带非零售标记；命中原因写入 hit(<=hit_len) */
+static bool fp_marker(const char *fp, const char *type, const char *tags,
+                      const char *incr, const char *name, char *hit, size_t hit_len) {
+    if (fp_is_eng_type(type))  { snprintf(hit, hit_len, "type=%s", type); return true; }
+    if (fp_has_testkeys(tags)) { snprintf(hit, hit_len, "tags=%s", tags); return true; }
+    if (fp_is_eng_incr(incr))  { snprintf(hit, hit_len, "incremental=%s", incr); return true; }
+    if (fp_has_ci(name, "aosp")) { snprintf(hit, hit_len, "product=%s", name); return true; }
+    if (fp_has_ci(fp, "aosp"))   { snprintf(hit, hit_len, "fp~aosp"); return true; }
+    if (fp_has_ci(fp, ":eng/") || fp_has_ci(fp, ":userdebug/")) { snprintf(hit, hit_len, "fp~eng"); return true; }
+    return false;
+}
+
+int env_detect_fingerprint_spoof(int *out_status, char (*details)[256], int max_details) {
+    *out_status = 0;
+    int n = 0;
+    bool danger = false, warning = false;
+
+    char main_fp[256] = {0}, main_id[256] = {0}, main_inc[256] = {0};
+    char main_type[256] = {0}, main_tags[256] = {0}, pname[256] = {0};
+    read_prop("ro.build.fingerprint", main_fp, sizeof(main_fp));
+    read_prop("ro.build.id", main_id, sizeof(main_id));
+    read_prop("ro.build.version.incremental", main_inc, sizeof(main_inc));
+    read_prop("ro.build.type", main_type, sizeof(main_type));
+    read_prop("ro.build.tags", main_tags, sizeof(main_tags));
+    read_prop("ro.product.name", pname, sizeof(pname));
+
+    if (n < max_details) {
+        snprintf(details[n], 256, "fingerprint: %s", main_fp[0] ? main_fp : "(empty)");
+        n++;
+    }
+
+    /* 1) 主指纹自洽：只比对 id/incremental/type/tags（用户明确点名、且为规范字段，低误报） */
+    if (main_fp[0]) {
+        char toks[8][160];
+        int cnt = fp_split(main_fp, toks);
+        if (cnt == 8) {
+            const char *labels[4] = {"id", "incremental", "type", "tags"};
+            const char *ftok[4]   = {toks[4], toks[5], toks[6], toks[7]};
+            const char *fprop[4]  = {main_id, main_inc, main_type, main_tags};
+            for (int i = 0; i < 4; i++) {
+                if (ftok[i][0] && fprop[i][0] && my_strcmp(ftok[i], fprop[i]) != 0) {
+                    danger = true;
+                    if (n < max_details) {
+                        snprintf(details[n], 256, "fingerprint %s mismatch: '%s' vs prop '%s'",
+                                 labels[i], ftok[i], fprop[i]);
+                        n++;
+                    }
+                }
+            }
+        } else if (n < max_details) {
+            snprintf(details[n], 256, "fingerprint format unusual (%d tokens) - self-check skipped", cnt);
+            n++;
+        }
+    }
+
+    /* 主体是否带非零售标记 */
+    char main_hit[96];
+    bool main_marked = fp_marker(main_fp, main_type, main_tags, main_inc, pname, main_hit, sizeof(main_hit));
+    bool main_looks_stock = main_fp[0] && !main_marked;
+    if (main_marked) {
+        warning = true;
+        if (n < max_details) { snprintf(details[n], 256, "main build is non-retail (%s)", main_hit); n++; }
+    }
+
+    /* 2) 分区标记扫描 + 核心 build.id 一致性（主 ro.build.id 与核心分区应同源） */
+    char core_ids[4][256];
+    int core_id_cnt = 0;
+    if (main_id[0]) {  /* 主 build.id 作为基准并入去重集 */
+        my_strncpy(core_ids[core_id_cnt], main_id, 255);
+        core_ids[core_id_cnt][255] = '\0';
+        core_id_cnt++;
+    }
+    const char *all_parts[] = {"system", "system_ext", "product", "vendor", "odm", "bootimage", nullptr};
+    for (int pi = 0; all_parts[pi]; ++pi) {
+        const char *P = all_parts[pi];
+        char key[128], pfp[256] = {0}, pid[256] = {0}, ptype[256] = {0}, ptags[256] = {0}, pinc[256] = {0};
+        snprintf(key, sizeof(key), "ro.%s.build.fingerprint", P);          read_prop(key, pfp, sizeof(pfp));
+        snprintf(key, sizeof(key), "ro.%s.build.id", P);                   read_prop(key, pid, sizeof(pid));
+        snprintf(key, sizeof(key), "ro.%s.build.type", P);                 read_prop(key, ptype, sizeof(ptype));
+        snprintf(key, sizeof(key), "ro.%s.build.tags", P);                 read_prop(key, ptags, sizeof(ptags));
+        snprintf(key, sizeof(key), "ro.%s.build.version.incremental", P);  read_prop(key, pinc, sizeof(pinc));
+
+        char hit[96];
+        if (fp_marker(pfp, ptype, ptags, pinc, "", hit, sizeof(hit))) {
+            if (main_looks_stock) {
+                danger = true;
+                if (n < max_details) {
+                    snprintf(details[n], 256, "%s partition non-retail (%s) while main looks stock - partial spoof", P, hit);
+                    n++;
+                }
+            } else {
+                warning = true;
+                if (n < max_details) { snprintf(details[n], 256, "%s partition non-retail: %s", P, hit); n++; }
+            }
+        }
+        /* 核心分区 build.id 收集去重 */
+        if (pid[0] && (my_strcmp(P, "system") == 0 || my_strcmp(P, "system_ext") == 0 || my_strcmp(P, "product") == 0)) {
+            bool seen = false;
+            for (int k = 0; k < core_id_cnt; k++) if (my_strcmp(core_ids[k], pid) == 0) { seen = true; break; }
+            if (!seen && core_id_cnt < 4) {
+                my_strncpy(core_ids[core_id_cnt], pid, 255);
+                core_ids[core_id_cnt][255] = '\0';
+                core_id_cnt++;
+            }
+        }
+    }
+    if (core_id_cnt > 1) {
+        danger = true;
+        if (n < max_details) {
+            snprintf(details[n], 256, "build.id inconsistent (main ro.build.id vs core partitions): %s / %s%s",
+                     core_ids[0], core_ids[1], core_id_cnt > 2 ? " / ..." : "");
+            n++;
+        }
+    }
+
+    if (danger)        *out_status = 2;
+    else if (warning)  *out_status = 1;
+    else {
+        *out_status = 0;
+        if (n < max_details) { snprintf(details[n], 256, "Build fingerprint consistent across partitions (no spoof markers)"); n++; }
+    }
+    return n;
+}
+
+int env_read_prop(const char *name, char *buf, int buf_len) {
+    if (!buf || buf_len < 2) { if (buf && buf_len > 0) buf[0] = '\0'; return 0; }
+    if (!name) { buf[0] = '\0'; return 0; }
+    read_prop(name, buf, (size_t) buf_len);
+    return (int) my_strlen(buf);
+}
+
+#else  /* non-Android build */
+int env_detect_fingerprint_spoof(int *out_status, char (*details)[256], int max_details) {
+    *out_status = 0;
+    if (max_details > 0) snprintf(details[0], 256, "Cannot read properties (non-Android build)");
+    return max_details > 0 ? 1 : 0;
+}
+int env_read_prop(const char *name, char *buf, int buf_len) {
+    (void) name;
+    if (buf && buf_len > 0) buf[0] = '\0';
+    return 0;
+}
+#endif
+
 /* memmem 替代：在 haystack 中查找 needle */
 static const void *my_memmem(const void *haystack, size_t haylen, const void *needle, size_t needlen) {
     if (!haystack || !needle || needlen == 0 || needlen > haylen) return nullptr;

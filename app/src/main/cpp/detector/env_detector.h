@@ -42,6 +42,14 @@ int env_detect_cgroup(char (*details)[256], int max_details);
 int env_verify_xposed_modules(const char **apk_paths, const char **pkg_names, int count,
                               char (*out_pkgs)[256], int max_out);
 
+// Device fingerprint spoof: per-partition build-prop consistency + eng/aosp/test-keys markers.
+// out_status: 0=NORMAL,1=WARNING,2=DANGER; returns detail count.
+int env_detect_fingerprint_spoof(int *out_status, char (*details)[256], int max_details);
+
+// Read a single system property into caller buffer (anti-hook via __system_property_read_callback).
+// Returns value length (0 if unavailable / non-Android).
+int env_read_prop(const char *name, char *buf, int buf_len);
+
 #ifdef __cplusplus
 }
 #endif
