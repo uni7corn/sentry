@@ -18,7 +18,7 @@
   - [D9. ArtMethod Entry](#d9-artmethod-entry)
   - [D10. Hook Trap](#d10-hook-trap)
   - [D11. Dirty Page / Memory Injection](#d11-dirty-page--memory-injection)
-- [Environment Tab · 16 项](#environment-tab--16-项)
+- [Environment Tab · 17 项](#environment-tab--17-项)
   - [E1. App Signature](#e1-app-signature)
   - [E2. Bootloader](#e2-bootloader)
   - [E3. Magisk / Root](#e3-magisk--root)
@@ -35,6 +35,7 @@
   - [E14. Key Attestation Trust（证书链强校验）](#e14-key-attestation-trust证书链强校验)
   - [E15. Device Fingerprint Spoof（设备指纹伪装）](#e15-device-fingerprint-spoof设备指纹伪装)
   - [E16. Play Integrity (Local)（本地近似）](#e16-play-integrity-local本地近似)
+  - [E17. System Property Integrity（属性交叉验证）](#e17-system-property-integrity属性交叉验证)
 - [平台覆盖与已知限制](#平台覆盖与已知限制)
 
 ---
@@ -55,7 +56,7 @@ max   = Σ(debug_item.max    × 1.5) + Σ(env_item.max)
 percent = round(100 × score / max)
 ```
 
-- 单项满分：默认 10；`Bootloader`/`App Signature`/`APK Repack Guard`/`Key Attestation Trust` 15、`Magisk/Root` 12、`Signature Bypass Footprint`/`Device Fingerprint Spoof` 12、`Kernel Patch`/`Play Integrity (Local)` 10（后者 warnOnly）、`Container`/`Cloud Phone / Sensors` 8、`Dangerous Apps`/`ADB Debug`/`Multi-instance`/`Suspicious Files`/`Emulator` 5。
+- 单项满分：默认 10；`Bootloader`/`App Signature`/`APK Repack Guard`/`Key Attestation Trust` 15、`Magisk/Root` 12、`Signature Bypass Footprint`/`Device Fingerprint Spoof`/`System Property Integrity` 12、`Kernel Patch`/`Play Integrity (Local)` 10（后者 warnOnly）、`Container`/`Cloud Phone / Sensors` 8、`Dangerous Apps`/`ADB Debug`/`Multi-instance`/`Suspicious Files`/`Emulator` 5。
 - `STATUS_NORMAL → maxScore`；`STATUS_WARNING → maxScore/2`（`warnOnly` 时仍取 maxScore）；`STATUS_DANGER → 0`。
 - 调试域 1.5× 权重在 [`MainActivity.applyDebugScoreWeight`](../app/src/main/java/anti/rusda/MainActivity.java)；调整权重时务必同步更新本文。
 
@@ -64,10 +65,10 @@ percent = round(100 × score / max)
 | 维度 | 项目数 | 单项 maxScore 累计 | × 权重 | 域满分 |
 |---|---|---|---|---|
 | Debug | 11 | 11 × 10 = 110 | × 1.5 | **165** |
-| Environment | 16 | 130 + 15（E14 Attestation Trust）+ 12（E15 Fingerprint Spoof）+ 10（E16 Play Integrity, warnOnly）= 167 | × 1 | **167** |
-| **总计** | 27 | — | — | **332** |
+| Environment | 17 | 130 + 15（E14 Attestation Trust）+ 12（E15 Fingerprint Spoof）+ 12（E17 Property Integrity）+ 10（E16 Play Integrity, warnOnly）= 179 | × 1 | **179** |
+| **总计** | 28 | — | — | **344** |
 
-> 即首页"100"代表 `score/332 = 100%`。环境域含三项签名相关检测：E1 走 PackageManager、E11 走文件级解析（反签名伪装）、E13 查"绕过本身"的结构足迹（多通道一致性 + CreatorProxy/PmProxy/factory 劫持/fd·inode 重定向/seccomp 一致性）。E16 Play Integrity 本地版为 `warnOnly` 且封顶 WARNING，对分数中性（避免与 Bootloader/Root/Attestation 重复计分）。
+> 即首页"100"代表 `score/344 = 100%`。环境域含三项签名相关检测：E1 走 PackageManager、E11 走文件级解析（反签名伪装）、E13 查"绕过本身"的结构足迹（多通道一致性 + CreatorProxy/PmProxy/factory 劫持/fd·inode 重定向/seccomp 一致性）。E16 Play Integrity 本地版为 `warnOnly` 且封顶 WARNING，对分数中性（避免与 Bootloader/Root/Attestation 重复计分）。E15 查指纹自身一致性，E17 则把属性与 TEE 认证的硬件真值交叉验证（互补）。
 
 ---
 
@@ -268,7 +269,7 @@ percent = round(100 × score / max)
 
 ---
 
-## Environment Tab · 16 项
+## Environment Tab · 17 项
 
 ### E1. App Signature
 
@@ -547,6 +548,24 @@ Native 属性读取走 `__system_property_read_callback`（同 Bootloader 项，
 4. **本地聚合 MEETS_BASIC / DEVICE / STRONG_INTEGRITY**：复用 E14 强校验结果（链可信 + 未吊销 + `deviceLocked` + `verifiedBoot` + 硬件级）、E15 指纹未伪装、Emulator、安全补丁新旧，近似映射三档裁决。
 
 `warnOnly` 且封顶 WARNING：避免与 Bootloader/Root/Attestation Trust 重复计分。
+
+---
+
+### E17. System Property Integrity（属性交叉验证）
+
+| 字段 | 值 |
+|---|---|
+| 实现 | [`EnvDetectionManager.detectSystemPropertyIntegrity()`](../app/src/main/java/anti/rusda/detector/EnvDetectionManager.java)；TEE 真值来自 [`KeyAttestationHelper.parseDeviceIdentity()`](../app/src/main/java/anti/rusda/detector/KeyAttestationHelper.java)（`nativeGetProp` + `getprop` exec） |
+| maxScore | 12 |
+| 状态 | 通道分裂 / TEE 机身标识不符 → DANGER；osVersion·osPatchLevel 不符 → WARNING；attestation 不可用或被伪造 → 记录并让位（不重复扣分） |
+
+**为什么需要它（E15 之外的第二层）**：E15 查指纹**自身**一致性,能抓"部分改包"和 Java hook。但 **resetprop / PIF(Play Integrity Fix)** 把**每个分区属性都改成同一套 stock 值**时,自洽/跨分区/标记全过 → E15 判 NORMAL(假阴性)。要识破彻底伪装,必须拿属性去和 **resetprop 改不动的独立事实源**交叉验证。
+
+**两路交叉验证**：
+1. **TEE 硬件身份/OS 版本·补丁**（核心）：Key Attestation 证书里由 TEE 附带的 `attestationIdBrand/Device/Product/Manufacturer/Model`（tag 710/711/712/716/717,需 API31+ `setDevicePropertiesAttestationIncluded`）与 `osVersion`(705)/`osPatchLevel`(706),这些由硬件/TEE 提供、resetprop/Magisk 动不了。与当前 `Build.BRAND/DEVICE/PRODUCT/MANUFACTURER/MODEL`、`Build.VERSION.RELEASE/SECURITY_PATCH` 比对：机身标识不符 → 属性被改（DANGER）；版本/补丁不符 → WARNING。**仅在 attestation 可信时采信**——若 [E15](#e14-key-attestation-trust证书链强校验) 判定 attestation 被伪造（如 TrickyStore 连证书链一起伪造）,TEE 值不可信,本项记录并让位给 E15 扣分,避免污染。
+2. **多通道读取**（抓 hook）：本进程 native `__system_property_get`（`nativeGetProp`）vs 独立进程 `getprop` exec。Frida/Xposed 在**本进程**内 hook 属性读取会让两者分裂;而 resetprop 真改属性值时两者一致（不误报）→ 分裂即 in-process 属性 hook（DANGER）。
+
+**与 E14/E15 的关系与已知限制**：E15=指纹自洽(抓部分改包/Java hook)；E17=属性 vs 硬件真值交叉(抓 resetprop/PIF 彻底伪装 + in-process hook)；两者互补覆盖用户列举的 resetprop/PIF、Xposed·Frida hook、TrickyStore（走 E15 强校验）、自定义 ROM/云手机。限制：若伪装在**构建期**就把 build 属性烤进系统镜像(定制 ROM),TEE 的设备属性认证可能读到同一套被改值,此类由 E14 标记(eng/aosp/test-keys)与 osPatchLevel 兜底;部分机型不支持设备属性认证时仅比对 OS 版本/补丁。
 
 ---
 

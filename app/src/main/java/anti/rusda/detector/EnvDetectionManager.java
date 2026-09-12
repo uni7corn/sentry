@@ -111,6 +111,7 @@ public class EnvDetectionManager {
         results.add(emulator);
         DetectionResult fingerprint = detectFingerprintSpoof();
         results.add(fingerprint);
+        results.add(detectSystemPropertyIntegrity(ar));
         results.add(detectCloudPhoneSensors());
         results.add(detectKernelPatch());
         results.add(detectAdbEnhanced());
@@ -652,6 +653,151 @@ public class EnvDetectionManager {
     private DetectionResult detectPlayIntegrity(KeyAttestationHelper.AttestationReport ar,
                                                 int fingerprintStatus, int emulatorStatus) {
         return PlayIntegrityHelper.evaluate(context, ar, fingerprintStatus, emulatorStatus);
+    }
+
+    /** 多通道属性比对要检查的关键属性 */
+    private static final String[] SPI_KEY_PROPS = {
+            "ro.build.fingerprint", "ro.product.brand", "ro.product.model",
+            "ro.product.device", "ro.product.manufacturer", "ro.build.version.security_patch"
+    };
+
+    /**
+     * 系统属性完整性（E17）：把系统属性和"改不动的独立事实源"交叉验证，识破 E14 抓不到的
+     * <b>彻底一致的属性伪装</b>（resetprop/PIF 把每个分区属性都改成同一套 stock 值时，自身一致性查不出）。
+     * <ul>
+     *   <li><b>TEE 硬件身份/OS 版本·补丁交叉</b>：Key Attestation 里 TEE 认证的
+     *       brand/device/product/manufacturer/model 与 osVersion/osPatchLevel（resetprop 改不动）
+     *       vs 当前 {@code Build.*}；不一致 → 属性被改（DANGER）。仅在 attestation 可信时采信
+     *       （TrickyStore 等伪造 attestation 的情况让位给 Key Attestation Trust 项判定）。</li>
+     *   <li><b>多通道读取</b>：本进程 native {@code __system_property_get} vs 独立进程 {@code getprop}；
+     *       Frida/Xposed 在本进程 hook 会让两者分裂，而 resetprop 真改则两者一致（不误报）。</li>
+     * </ul>
+     */
+    private DetectionResult detectSystemPropertyIntegrity(KeyAttestationHelper.AttestationReport ar) {
+        List<String> details = new ArrayList<>();
+        int status = DetectionResult.STATUS_NORMAL;
+
+        /* 1) 多通道：本进程 native vs 独立进程 getprop（抓 in-process hook） */
+        details.add("═══ Multi-channel prop reads (native vs getprop) ═══");
+        int hookHits = 0;
+        for (String p : SPI_KEY_PROPS) {
+            String nat = safeNativeProp(p);
+            String exec = execReadFirstLine(new String[]{"/system/bin/getprop", p});
+            if (!nat.isEmpty() && exec != null && !exec.isEmpty() && !nat.equals(exec)) {
+                details.add("HOOK: " + p + " native='" + shortValue(nat) + "' getprop='" + shortValue(exec) + "'");
+                hookHits++;
+            }
+        }
+        if (hookHits > 0) {
+            status = DetectionResult.STATUS_DANGER;
+            details.add(hookHits + " prop(s) differ between in-process read and getprop - in-process property hook");
+        } else {
+            details.add("native vs getprop consistent for key props");
+        }
+
+        /* 2) TEE 硬件交叉验证（resetprop/PIF 改不动 TEE） */
+        details.add("═══ TEE-attested identity cross-check ═══");
+        if (ar == null || !ar.available) {
+            details.add("Attestation unavailable - TEE cross-check skipped (see Bootloader / Key Attestation Trust)");
+        } else if (ar.trustStatus == DetectionResult.STATUS_DANGER) {
+            details.add("Attestation forged/untrusted - TEE values not used as ground truth here (penalised under Key Attestation Trust)");
+        } else {
+            boolean idMismatch = false;
+            if (ar.devicePropsAttested) {
+                idMismatch |= crossCheckId(details, "brand", ar.idBrand, Build.BRAND);
+                idMismatch |= crossCheckId(details, "device", ar.idDevice, Build.DEVICE);
+                idMismatch |= crossCheckId(details, "product", ar.idProduct, Build.PRODUCT);
+                idMismatch |= crossCheckId(details, "manufacturer", ar.idManufacturer, Build.MANUFACTURER);
+                idMismatch |= crossCheckId(details, "model", ar.idModel, Build.MODEL);
+            } else {
+                details.add("Device-properties attestation unsupported here - using OS version/patch only");
+            }
+            if (idMismatch) status = DetectionResult.STATUS_DANGER;
+
+            int teeMajor = ar.osVersion > 0 ? ar.osVersion / 10000 : -1;
+            int propMajor = majorFromRelease(Build.VERSION.RELEASE);
+            if (teeMajor > 0 && propMajor > 0) {
+                if (teeMajor == propMajor) {
+                    details.add("osVersion major " + propMajor + " == TEE ✓");
+                } else {
+                    details.add("osVersion MISMATCH: Build=" + propMajor + " vs TEE=" + teeMajor);
+                    if (status < DetectionResult.STATUS_WARNING) status = DetectionResult.STATUS_WARNING;
+                }
+            }
+            int propPatch = yyyymmFromSecurityPatch(Build.VERSION.SECURITY_PATCH);
+            if (ar.osPatchLevel > 0 && propPatch > 0) {
+                if (ar.osPatchLevel == propPatch) {
+                    details.add("osPatchLevel " + propPatch + " == TEE ✓");
+                } else {
+                    details.add("osPatchLevel MISMATCH: Build=" + propPatch + " vs TEE=" + ar.osPatchLevel);
+                    if (status < DetectionResult.STATUS_WARNING) status = DetectionResult.STATUS_WARNING;
+                }
+            }
+        }
+
+        String summary = status == DetectionResult.STATUS_DANGER
+                ? "System properties spoofed / hooked (cross-check failed)"
+                : status == DetectionResult.STATUS_WARNING
+                ? "Property vs TEE version/patch mismatch (see details)"
+                : "System properties consistent with hardware attestation";
+        return new DetectionResult("System Property Integrity", summary, status, 12, details);
+    }
+
+    /** native 属性读取安全封装；失败/异常返回空串。 */
+    private static String safeNativeProp(String name) {
+        try {
+            String v = nativeGetProp(name);
+            return v == null ? "" : v;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 比对 TEE 认证的机身标识与当前 Build 值；不一致返回 true 并记录明细。 */
+    private static boolean crossCheckId(List<String> details, String label, String tee, String prop) {
+        if (tee == null || tee.isEmpty()) {
+            details.add(label + ": not attested by TEE (skipped)");
+            return false;
+        }
+        if (prop == null || prop.isEmpty()) return false;
+        if (tee.equalsIgnoreCase(prop)) {
+            details.add(label + ": " + prop + " == TEE ✓");
+            return false;
+        }
+        details.add(label + " MISMATCH: prop='" + prop + "' vs TEE-attested='" + tee + "' - property spoofed ✗");
+        return true;
+    }
+
+    private static String shortValue(String s) {
+        if (s == null) return "";
+        return s.length() > 40 ? s.substring(0, 40) + "…" : s;
+    }
+
+    /** "2025-08-05" → 202508；无法解析返回 -1。 */
+    private static int yyyymmFromSecurityPatch(String sp) {
+        if (sp == null || sp.length() < 7) return -1;
+        String[] p = sp.split("-");
+        if (p.length >= 2) {
+            try {
+                return Integer.parseInt(p[0]) * 100 + Integer.parseInt(p[1]);
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    /** 取版本号主版本（"15" → 15）；无法解析返回 -1。 */
+    private static int majorFromRelease(String rel) {
+        if (rel == null || rel.isEmpty()) return -1;
+        int i = 0;
+        while (i < rel.length() && Character.isDigit(rel.charAt(i))) i++;
+        if (i == 0) return -1;
+        try {
+            return Integer.parseInt(rel.substring(0, i));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     /** 将 Native 层返回的 String[] 转为 DetectionResult。格式: [status, summary, detail0, ...]；无法执行时显示 Check skipped、不扣分 */

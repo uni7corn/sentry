@@ -121,6 +121,12 @@ public class KeyAttestationHelper {
         public boolean revoked = false;           // 命中吊销名单
         public boolean challengeMatch = false;
         public int securityLevel = -1;            // 0/1/2，-1 未知
+
+        // ── 供 System Property Integrity 做"属性 vs 硬件"交叉验证的 TEE 真值
+        public boolean devicePropsAttested = false;  // 是否带设备属性认证(API31+)
+        public int osVersion = -1;                    // 编码 major*10000+minor*100+sub
+        public int osPatchLevel = -1;                 // YYYYMM
+        public String idBrand, idDevice, idProduct, idManufacturer, idModel;  // TEE 认证的机身标识
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -150,22 +156,29 @@ public class KeyAttestationHelper {
             byte[] challenge = new byte[32];
             new java.security.SecureRandom().nextBytes(challenge);
 
-            /* 刻意用 PURPOSE_SIGN，不用 PURPOSE_ATTEST_KEY —— 规避 KeyMint 给 attest-key
-             * 发空 KeyUsage 的 RFC 误报（与 keybox 好坏无关，不应据此判伪）。 */
-            KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
-                    ATTESTATION_KEY_ALIAS, KeyProperties.PURPOSE_SIGN)
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-                    .setAttestationChallenge(challenge)
-                    .build();
-
-            KeyPairGenerator kpg = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE);
-            kpg.initialize(spec);
-            kpg.generateKeyPair();
-
             ks = KeyStore.getInstance(ANDROID_KEYSTORE);
             ks.load(null);
-            Certificate[] chain = ks.getCertificateChain(ATTESTATION_KEY_ALIAS);
+
+            /* 优先带"设备属性认证"(API31+：brand/device/product/manufacturer/model 由 TEE 附带)，
+             * 供 System Property Integrity 项做硬件交叉验证；不支持的机型抛错则回退到不带该标志，
+             * 保证证书链对 Bootloader / Attestation Trust 仍可用。 */
+            Certificate[] chain = null;
+            if (Build.VERSION.SDK_INT >= 31) {
+                try {
+                    generateAttestationKey(challenge, true);
+                    chain = ks.getCertificateChain(ATTESTATION_KEY_ALIAS);
+                    if (chain != null && chain.length > 0) r.devicePropsAttested = true;
+                } catch (Throwable t) {
+                    deleteAttestationKey(ks);
+                    chain = null;
+                }
+            }
+            if (chain == null || chain.length == 0) {
+                r.devicePropsAttested = false;
+                deleteAttestationKey(ks);
+                generateAttestationKey(challenge, false);
+                chain = ks.getCertificateChain(ATTESTATION_KEY_ALIAS);
+            }
 
             if (chain == null || chain.length == 0) {
                 r.rootStatus = DetectionResult.STATUS_WARNING;
@@ -182,6 +195,7 @@ public class KeyAttestationHelper {
 
             fillRootOfTrust(r, chain, extValue);          // Bootloader 视图
             fillTrust(context, r, chain, extValue, challenge);  // 强校验视图
+            parseDeviceIdentity(extValue, r);             // TEE 机身标识 / OS 版本·补丁（供属性交叉验证）
 
             return r;
         } catch (Exception e) {
@@ -624,9 +638,74 @@ public class KeyAttestationHelper {
         return -1;
     }
 
+    /**
+     * 解析 TEE 认证的机身标识与 OS 版本/补丁（供 System Property Integrity 做"属性 vs 硬件"交叉验证）。
+     * 这些值由 TEE 附带、resetprop/Magisk 改不动，是识破彻底属性伪装的 ground truth。
+     * AuthorizationList 里各项为 [tag] EXPLICIT：osVersion=705, osPatchLevel=706,
+     * attestationIdBrand=710, Device=711, Product=712, Manufacturer=716, Model=717。
+     */
+    private static void parseDeviceIdentity(byte[] extValue, AttestationReport r) {
+        ASN1Sequence kd = keyDescriptionOf(extValue);
+        if (kd == null) return;
+        for (int idx : new int[]{7, 6}) {   // teeEnforced 优先，softwareEnforced 兜底
+            if (idx >= kd.size()) continue;
+            ASN1Sequence al = toSequence(kd.getObjectAt(idx));
+            if (al == null) continue;
+            if (r.osVersion < 0)          r.osVersion = authInt(al, 705);
+            if (r.osPatchLevel < 0)       r.osPatchLevel = authInt(al, 706);
+            if (r.idBrand == null)        r.idBrand = authStr(al, 710);
+            if (r.idDevice == null)       r.idDevice = authStr(al, 711);
+            if (r.idProduct == null)      r.idProduct = authStr(al, 712);
+            if (r.idManufacturer == null) r.idManufacturer = authStr(al, 716);
+            if (r.idModel == null)        r.idModel = authStr(al, 717);
+        }
+    }
+
+    private static ASN1Primitive authTag(ASN1Sequence authList, int tag) {
+        if (authList == null) return null;
+        for (int i = 0; i < authList.size(); i++) {
+            ASN1Encodable e = authList.getObjectAt(i);
+            if (e instanceof ASN1TaggedObject) {
+                ASN1TaggedObject to = (ASN1TaggedObject) e;
+                if (to.getTagNo() == tag) {
+                    try { return to.getBaseObject().toASN1Primitive(); } catch (Exception ex) { return null; }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static int authInt(ASN1Sequence al, int tag) {
+        ASN1Primitive p = authTag(al, tag);
+        return p == null ? -1 : getInt(p);
+    }
+
+    private static String authStr(ASN1Sequence al, int tag) {
+        ASN1Primitive p = authTag(al, tag);
+        byte[] b = (p == null) ? null : getOctetString(p);
+        if (b == null || b.length == 0) return null;
+        try { return new String(b, StandardCharsets.UTF_8).trim(); } catch (Exception e) { return null; }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Misc
     // ─────────────────────────────────────────────────────────────────────────
+
+    /** 生成带 attestation 挑战的 EC 密钥（刻意 PURPOSE_SIGN，规避 attest-key 空 KeyUsage 的 RFC 误报）。
+     *  deviceProps=true 时附带设备属性认证(API31+：brand/device/product/manufacturer/model)。 */
+    private static void generateAttestationKey(byte[] challenge, boolean deviceProps) throws Exception {
+        KeyGenParameterSpec.Builder b = new KeyGenParameterSpec.Builder(
+                ATTESTATION_KEY_ALIAS, KeyProperties.PURPOSE_SIGN)
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setAttestationChallenge(challenge);
+        if (deviceProps && Build.VERSION.SDK_INT >= 31) {
+            b.setDevicePropertiesAttestationIncluded(true);
+        }
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE);
+        kpg.initialize(b.build());
+        kpg.generateKeyPair();
+    }
 
     private static boolean isLikelyEmulator() {
         String model = Build.MODEL != null ? Build.MODEL : "";

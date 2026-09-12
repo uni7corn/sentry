@@ -35,7 +35,7 @@
 
 **调试域 · 11 项**：Frida 线程 / Frida 端口与进程 / 内存与 maps 签名 / Java exec 通道 maps / ptrace 与调试器附加 / Debug.isDebuggerConnected / Xposed·Hook 框架（含 **ClassLinker `class_loaders_` 计数**，对抗 maps 隐藏） / SO 代码段完整性 / ArtMethod entry / SIGTRAP Hook 陷阱 / 脏页与内存注入。
 
-**环境域 · 16 项**：App 签名校验（PackageManager） / **APK 防改包·反签名伪装（文件级解析 v2/v3 签名块）** / **签名绕过足迹（多通道签名一致性 + CreatorProxy / PmProxy / appComponentFactory 劫持 / fd·maps inode 重定向 / seccomp 一致性）** / Bootloader + Key Attestation RootOfTrust / **Key Attestation 证书强校验（链密码学逐级验签 + Google 硬件根 pinning + 吊销名单 KEY_COMPROMISE + 挑战值核对 + 安全级别 + appId 绑定，识破泄露/伪造 keybox 与回放链）** / Magisk·Root / 危险应用（warnOnly） / 可疑路径 / 模拟器 / **设备指纹伪装（per-partition 属性一致性 + eng/aosp/test-keys 标记，Native 属性 + Java Build.\* 双通道，白名单无关）** / **云手机·传感器/硬件真实性（传感器数量与厂商、电池温压）** / 内核补丁陈旧度（warnOnly） / ADB 多通道（warnOnly） / **Play Integrity 本地版（GMS/Play 组件与 Google 签名 + Play Protect + 本地 BASIC/DEVICE/STRONG 近似裁决，warnOnly）** / 多开 / 容器与 cgroup。
+**环境域 · 17 项**：App 签名校验（PackageManager） / **APK 防改包·反签名伪装（文件级解析 v2/v3 签名块）** / **签名绕过足迹（多通道签名一致性 + CreatorProxy / PmProxy / appComponentFactory 劫持 / fd·maps inode 重定向 / seccomp 一致性）** / Bootloader + Key Attestation RootOfTrust / **Key Attestation 证书强校验（链密码学逐级验签 + Google 硬件根 pinning + 吊销名单 KEY_COMPROMISE + 挑战值核对 + 安全级别 + appId 绑定，识破泄露/伪造 keybox 与回放链）** / Magisk·Root / 危险应用（warnOnly） / 可疑路径 / 模拟器 / **设备指纹伪装（per-partition 属性一致性 + eng/aosp/test-keys 标记，Native 属性 + Java Build.\* 双通道，白名单无关）** / **系统属性完整性（属性 vs TEE 认证的机身标识/OS 版本·补丁交叉验证，识破 resetprop/PIF 彻底伪装；本进程 native vs 独立进程 getprop 比对抓 hook）** / **云手机·传感器/硬件真实性（传感器数量与厂商、电池温压）** / 内核补丁陈旧度（warnOnly） / ADB 多通道（warnOnly） / **Play Integrity 本地版（GMS/Play 组件与 Google 签名 + Play Protect + 本地 BASIC/DEVICE/STRONG 近似裁决，warnOnly）** / 多开 / 容器与 cgroup。
 
 每项的原理、命中条件、代码位置、权重、`warnOnly`、平台限制与已知误报场景见 [`doc/DETECTION_SPEC.md`](doc/DETECTION_SPEC.md)。
 
@@ -98,7 +98,7 @@ max     = Σ(debug.max    × 1.5) + Σ(env.max)
 percent = round(100 × score / max)
 ```
 
-按当前权重满分 **332**：调试域 11×10 ×1.5 = **165**，环境域 130 + 15（Key Attestation Trust）+ 12（设备指纹伪装）+ 10（Play Integrity 本地版）= **167**。首页"100"等价 `score/332 == 100%`。（Play Integrity 本地版为 `warnOnly` 且封顶 WARNING，对分数中性，仅参考。）
+按当前权重满分 **344**：调试域 11×10 ×1.5 = **165**，环境域 130 + 15（Key Attestation Trust）+ 12（设备指纹伪装）+ 12（系统属性完整性）+ 10（Play Integrity 本地版）= **179**。首页"100"等价 `score/344 == 100%`。（Play Integrity 本地版为 `warnOnly` 且封顶 WARNING，对分数中性，仅参考。）
 
 `warnOnly` 在 WARNING 时仍计满分，仅 UI 警示——把"开发机常开 ADB、补丁偏旧、装有 Xposed 模块但不等于正在 hook 本进程"等场景从分数里解耦，减少运营误伤。
 
